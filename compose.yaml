@@ -1,0 +1,204 @@
+name: enterprise-sales-agent
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-development}
+  DATABASE_URL: postgresql+asyncpg://sales_agent:sales_agent@postgres:5432/sales_agent
+  LANGGRAPH_DATABASE_URL: postgresql://sales_agent:sales_agent@postgres:5432/sales_agent
+  CHECKPOINTER_BACKEND: ${CHECKPOINTER_BACKEND:-memory}
+  MEMORY_BACKEND: ${MEMORY_BACKEND:-memory}
+  AUDIT_BACKEND: ${AUDIT_BACKEND:-log}
+  LANGGRAPH_STRICT_MSGPACK: "true"
+  REDIS_URL: redis://redis:6379/0
+  MILVUS_URI: http://milvus:19530
+  MILVUS_TOKEN: ${MILVUS_TOKEN:-}
+  RAG_BACKEND: ${RAG_BACKEND:-mock}
+  RAG_COLLECTION_NAME: ${RAG_COLLECTION_NAME:-sales_document_chunks}
+  RAG_EMBEDDING_DIM: ${RAG_EMBEDDING_DIM:-1024}
+  RAG_CHUNK_SIZE_CHARS: ${RAG_CHUNK_SIZE_CHARS:-1200}
+  RAG_CHUNK_OVERLAP_CHARS: ${RAG_CHUNK_OVERLAP_CHARS:-160}
+  RAG_RETRIEVAL_TOP_K: ${RAG_RETRIEVAL_TOP_K:-20}
+  RAG_RERANK_TOP_K: ${RAG_RERANK_TOP_K:-5}
+  RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.0}
+  RAG_EMBEDDING_DEVICE: ${RAG_EMBEDDING_DEVICE:-cpu}
+  RAG_EMBEDDING_BATCH_SIZE: ${RAG_EMBEDDING_BATCH_SIZE:-16}
+  RAG_ENABLE_RERANKER: ${RAG_ENABLE_RERANKER:-true}
+  NEBULA_HOST: nebula-graphd
+  NEBULA_PORT: 9669
+  NEBULA_USER: root
+  NEBULA_PASSWORD: ${NEBULA_PASSWORD:-nebula}
+  TOOL_BACKEND: ${TOOL_BACKEND:-mock}
+  DATA_BACKEND: ${DATA_BACKEND:-mock}
+  MCP_SERVER_URL: http://mcp:8001/mcp
+  MCP_SERVICE_TOKEN: ${MCP_SERVICE_TOKEN:-local-mcp-token}
+  JWT_SECRET: ${JWT_SECRET:-local-development-only}
+  ALLOW_DEV_TOKEN: ${ALLOW_DEV_TOKEN:-true}
+  POSTGRES_POOL_MIN_SIZE: ${POSTGRES_POOL_MIN_SIZE:-1}
+  POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-10}
+  POSTGRES_COMMAND_TIMEOUT_SECONDS: ${POSTGRES_COMMAND_TIMEOUT_SECONDS:-15}
+  LLM_PROVIDER: ${LLM_PROVIDER:-openai_compatible}
+  LLM_API_STYLE: ${LLM_API_STYLE:-chat_completions}
+  LLM_REASONING_BACKEND: ${LLM_REASONING_BACKEND:-rules}
+  LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
+  LLM_ROUTER_MODEL: ${LLM_ROUTER_MODEL:-}
+  LLM_SYNTHESIS_MODEL: ${LLM_SYNTHESIS_MODEL:-}
+  LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
+  LLM_CONNECT_TIMEOUT_SECONDS: ${LLM_CONNECT_TIMEOUT_SECONDS:-10}
+  LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-1200}
+  LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.1}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+  LLM_CIRCUIT_FAILURE_THRESHOLD: ${LLM_CIRCUIT_FAILURE_THRESHOLD:-5}
+  LLM_CIRCUIT_RECOVERY_SECONDS: ${LLM_CIRCUIT_RECOVERY_SECONDS:-30}
+  LLM_MAX_CONCURRENCY: ${LLM_MAX_CONCURRENCY:-8}
+  LLM_BULKHEAD_WAIT_SECONDS: ${LLM_BULKHEAD_WAIT_SECONDS:-0.1}
+  LLM_RETRY_BASE_DELAY_SECONDS: ${LLM_RETRY_BASE_DELAY_SECONDS:-0.25}
+  LLM_BUDGET_TOKENS: ${LLM_BUDGET_TOKENS:-12000}
+  TOOL_TIMEOUT_SECONDS: ${TOOL_TIMEOUT_SECONDS:-20}
+  TOOL_MAX_RETRIES: ${TOOL_MAX_RETRIES:-1}
+  TOOL_RETRY_BASE_DELAY_SECONDS: ${TOOL_RETRY_BASE_DELAY_SECONDS:-0.2}
+  TOOL_CIRCUIT_FAILURE_THRESHOLD: ${TOOL_CIRCUIT_FAILURE_THRESHOLD:-5}
+  TOOL_CIRCUIT_RECOVERY_SECONDS: ${TOOL_CIRCUIT_RECOVERY_SECONDS:-30}
+  TOOL_MAX_CONCURRENCY: ${TOOL_MAX_CONCURRENCY:-20}
+  TOOL_BULKHEAD_WAIT_SECONDS: ${TOOL_BULKHEAD_WAIT_SECONDS:-0.1}
+  API_REQUEST_TIMEOUT_SECONDS: ${API_REQUEST_TIMEOUT_SECONDS:-90}
+  API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-60}
+  API_MAX_CONCURRENT_PER_USER: ${API_MAX_CONCURRENT_PER_USER:-4}
+  API_CONCURRENCY_WAIT_SECONDS: ${API_CONCURRENCY_WAIT_SECONDS:-0.1}
+
+services:
+  api:
+    build: .
+    command: ["uvicorn", "sales_agent.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - exports:/app/exports
+    restart: unless-stopped
+
+  mcp:
+    build: .
+    command: ["python", "-m", "sales_agent.mcp_server"]
+    environment: *app-env
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - exports:/app/exports
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16.10-alpine
+    environment:
+      POSTGRES_DB: sales_agent
+      POSTGRES_USER: sales_agent
+      POSTGRES_PASSWORD: sales_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sales_agent -d sales_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "volatile-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    profiles: ["full"]
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir=/etcd
+    volumes:
+      - etcd_data:/etcd
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    profiles: ["full"]
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data
+    volumes:
+      - minio_data:/minio_data
+
+  milvus:
+    image: milvusdb/milvus:v3.0.2
+    profiles: ["full"]
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    depends_on:
+      - etcd
+      - minio
+
+  nebula-metad:
+    image: vesoft/nebula-metad:${NEBULA_VERSION:-v3.8.0}
+    profiles: ["full"]
+    command: ["--meta_server_addrs=nebula-metad:9559", "--local_ip=nebula-metad", "--ws_ip=0.0.0.0", "--port=9559", "--ws_http_port=19559"]
+    volumes:
+      - nebula_meta:/data/meta
+
+  nebula-storaged:
+    image: vesoft/nebula-storaged:${NEBULA_VERSION:-v3.8.0}
+    profiles: ["full"]
+    command: ["--meta_server_addrs=nebula-metad:9559", "--local_ip=nebula-storaged", "--ws_ip=0.0.0.0", "--port=9779", "--ws_http_port=19779"]
+    volumes:
+      - nebula_storage:/data/storage
+    depends_on:
+      - nebula-metad
+
+  nebula-graphd:
+    image: vesoft/nebula-graphd:${NEBULA_VERSION:-v3.8.0}
+    profiles: ["full"]
+    command: ["--meta_server_addrs=nebula-metad:9559", "--port=9669", "--local_ip=nebula-graphd", "--ws_ip=0.0.0.0", "--ws_http_port=19669"]
+    ports:
+      - "9669:9669"
+    depends_on:
+      - nebula-metad
+
+volumes:
+  postgres_data:
+  redis_data:
+  exports:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  nebula_meta:
+  nebula_storage:

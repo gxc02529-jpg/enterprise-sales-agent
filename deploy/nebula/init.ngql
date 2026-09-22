@@ -1,0 +1,54 @@
+-- NebulaGraph 建图 + 模拟关系数据（与 deploy/postgres/init.sql 的销售实体对齐）
+-- 用法（在有 NebulaGraph 的环境）：
+--   nebula-console -addr <host> -port 9669 -u root -p nebula -f deploy/nebula/init.ngql
+-- 之后设 GRAPH_BACKEND=nebula 即可让 graph_relations 走真实图。
+-- vid 采用 FIXED_STRING(64)，实体名直接作为 vid，与 tools/nebula.py 的 GET SUBGRAPH 起始点一致。
+
+CREATE SPACE IF NOT EXISTS sales_graph (vid_type=FIXED_STRING(64));
+USE sales_graph;
+
+CREATE TAG IF NOT EXISTS company(name string, tenant_id string, permission_tags string);
+CREATE TAG IF NOT EXISTS contract(contract_no string, tenant_id string, amount double, signed_at string);
+CREATE TAG IF NOT EXISTS product(name string);
+CREATE TAG IF NOT EXISTS employee(name string, tenant_id string, department string);
+
+CREATE EDGE IF NOT EXISTS SIGNED(tenant_id string, signed_at string);
+CREATE EDGE IF NOT EXISTS CONTAINS(tenant_id string);
+CREATE EDGE IF NOT EXISTS MANAGES(tenant_id string);
+
+-- 顶点：客户 / 合同 / 产品 / 销售
+INSERT VERTEX company(name, tenant_id, permission_tags)
+    VALUES "华东智造集团":("华东智造集团", "demo-tenant", "sales:demo-sales-001,region:east");
+INSERT VERTEX company(name, tenant_id, permission_tags)
+    VALUES "华南精工科技":("华南精工科技", "demo-tenant", "sales:demo-sales-002,region:south");
+
+INSERT VERTEX contract(contract_no, tenant_id, amount, signed_at)
+    VALUES "HT-2026-001":("HT-2026-001", "demo-tenant", 1280000.0, "2026-02-18"),
+           "HT-2026-018":("HT-2026-018", "demo-tenant", 2150000.0, "2026-06-12"),
+           "HT-2026-031":("HT-2026-031", "demo-tenant", 1760000.0, "2026-08-26"),
+           "HT-2026-044":("HT-2026-044", "demo-tenant", 960000.0, "2026-09-01");
+
+INSERT VERTEX product(name)
+    VALUES "工业视觉平台":("工业视觉平台"),
+           "智能运维平台":("智能运维平台");
+
+INSERT VERTEX employee(name, tenant_id, department)
+    VALUES "demo-sales-001":("演示销售", "demo-tenant", "华东销售部"),
+           "demo-sales-002":("演示销售二", "demo-tenant", "华南销售部");
+
+-- 边：客户 --SIGNED--> 合同 --CONTAINS--> 产品；销售 --MANAGES--> 客户
+INSERT EDGE SIGNED(tenant_id, signed_at)
+    VALUES "华东智造集团" -> "HT-2026-001":("demo-tenant", "2026-02-18"),
+           "华东智造集团" -> "HT-2026-018":("demo-tenant", "2026-06-12"),
+           "华东智造集团" -> "HT-2026-031":("demo-tenant", "2026-08-26"),
+           "华南精工科技" -> "HT-2026-044":("demo-tenant", "2026-09-01");
+
+INSERT EDGE CONTAINS(tenant_id)
+    VALUES "HT-2026-001" -> "工业视觉平台":("demo-tenant"),
+           "HT-2026-018" -> "工业视觉平台":("demo-tenant"),
+           "HT-2026-031" -> "智能运维平台":("demo-tenant"),
+           "HT-2026-044" -> "智能运维平台":("demo-tenant");
+
+INSERT EDGE MANAGES(tenant_id)
+    VALUES "demo-sales-001" -> "华东智造集团":("demo-tenant"),
+           "demo-sales-002" -> "华南精工科技":("demo-tenant");

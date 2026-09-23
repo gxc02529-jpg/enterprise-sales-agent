@@ -70,6 +70,15 @@ def _hit_payload(hit: Any) -> tuple[str, float, dict[str, Any]]:
     ), entity
 
 
+def select_candidates(
+    candidates: list[dict[str, Any]], *, min_score: float, limit: int
+) -> list[dict[str, Any]]:
+    """Apply the calibrated refusal boundary after ranking and before citations."""
+    return [
+        item for item in candidates if float(item.get("score", 0.0)) >= min_score
+    ][:limit]
+
+
 class MilvusRagService:
     def __init__(
         self,
@@ -282,8 +291,11 @@ class MilvusRagService:
         else:
             for item in candidates:
                 item["score"] = item["retrieval_score"]
-        return [
-            item
-            for item in candidates
-            if float(item.get("score", 0)) >= self.settings.rag_min_score
-        ][: params.rerank_top_k]
+        min_score = (
+            self.settings.rag_min_score
+            if self.reranker is not None
+            else self.settings.rag_min_retrieval_score
+        )
+        return select_candidates(
+            candidates, min_score=min_score, limit=params.rerank_top_k
+        )

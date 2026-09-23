@@ -1,0 +1,1 @@
+{"case_id":"mock-smoke","query":"查询客户拜访纪要中的预算和交付要求","principal":{"user_id":"demo-sales-001","tenant_id":"demo-tenant","roles":["sales"],"scope_tags":["sales:demo-sales-001"]},"expected_document_ids":["visit-note-2026-0912"],"forbidden_document_ids":["forbidden-document"],"top_k":5}

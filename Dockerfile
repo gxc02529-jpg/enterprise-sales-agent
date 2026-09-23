@@ -8,7 +8,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install ".[infra]"
+RUN pip install ".[infra,rag,documents,observability]"
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/exports \
@@ -17,4 +17,3 @@ USER appuser
 
 EXPOSE 8000 8001
 CMD ["uvicorn", "sales_agent.api:app", "--host", "0.0.0.0", "--port", "8000"]
-

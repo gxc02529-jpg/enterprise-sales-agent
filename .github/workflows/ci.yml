@@ -44,3 +44,12 @@ jobs:
         run: pytest -q
         env:
           TEST_DATABASE_URL: postgresql://sales_agent:sales_agent@localhost:5432/sales_agent
+
+      - name: RAG evaluation CLI smoke
+        run: >-
+          python -m sales_agent.evaluation.rag
+          --dataset evaluations/rag/mock-smoke.jsonl
+          --allow-mock
+          --min-recall 1
+          --min-mrr 1
+          --output build/reports/rag-eval-smoke.json

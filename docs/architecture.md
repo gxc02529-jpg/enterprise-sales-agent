@@ -42,6 +42,7 @@ flowchart TD
 | MCP 内部 Mock backend | PostgreSQL/Nebula/Milvus adapters | 参数化模板、RLS/标签过滤、查询上限 |
 | `InMemoryMemoryService` | `PostgresMemoryService`（已实现）+ Redis session cache | TTL、用户隔离、审核状态、审计 |
 | `InMemorySaver` | `AsyncPostgresSaver`（已接入） | 首次 setup、连接池、严格反序列化白名单 |
+| 内存摄取队列 | PostgreSQL Job Store + Redis Stream（已接入） | RLS、消费者组、租约、at-least-once、死信、保留期限 |
 | 规则路由 | 规则高精度 + 结构化 LLM fallback | route schema 固定，低置信转人工 |
 | 确定性融合 | Grounded LLM synthesizer | 只使用工具 payload，逐结论引用 |
 
@@ -67,3 +68,5 @@ SET LOCAL app.session_id = 'session-001';
 ```
 
 初始化脚本给出了 RLS 示例。生产中还需防止连接池复用导致上下文残留，必须使用 `SET LOCAL` 并限定在事务内。
+
+文档摄取 Worker 使用 `app.ingestion_worker=true` 的独立事务上下文读取跨租户任务；该标志只在服务端固定 SQL 中设置，不能从 HTTP、JWT 或 LLM 参数传入。面向管理员的任务查询仍要求 `tenant_id` 匹配。

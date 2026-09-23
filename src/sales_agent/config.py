@@ -46,7 +46,8 @@ class Settings(BaseSettings):
     rag_chunk_overlap_chars: int = Field(default=160, ge=0, le=5_000)
     rag_retrieval_top_k: int = Field(default=20, ge=1, le=200)
     rag_rerank_top_k: int = Field(default=5, ge=1, le=50)
-    rag_min_score: float = Field(default=0.0, ge=0, le=1)
+    rag_min_score: float = Field(default=0.35, ge=0, le=1)
+    rag_min_retrieval_score: float = Field(default=0.0, ge=0, le=1)
     rag_embedding_device: str = "cpu"
     rag_embedding_batch_size: int = Field(default=16, ge=1, le=512)
     rag_enable_reranker: bool = True
@@ -107,6 +108,15 @@ class Settings(BaseSettings):
     api_concurrency_wait_seconds: float = Field(default=0.1, ge=0.01, le=30)
     ingestion_max_file_bytes: int = Field(default=20_000_000, ge=1_024, le=500_000_000)
     ingestion_queue_capacity: int = Field(default=100, ge=1, le=100_000)
+    ingestion_backend: Literal["memory", "redis_stream"] = "memory"
+    ingestion_stream_name: str = "sales-agent:document-ingestion"
+    ingestion_consumer_group: str = "sales-agent-indexers"
+    ingestion_max_attempts: int = Field(default=3, ge=1, le=20)
+    ingestion_claim_idle_seconds: int = Field(default=300, ge=30, le=86_400)
+    ingestion_poll_block_ms: int = Field(default=1_000, ge=100, le=60_000)
+    ingestion_cleanup_interval_seconds: int = Field(default=3_600, ge=60, le=86_400)
+    ingestion_failed_payload_retention_days: int = Field(default=7, ge=1, le=365)
+    ingestion_job_retention_days: int = Field(default=90, ge=7, le=3_650)
 
     @model_validator(mode="after")
     def reject_unsafe_production_defaults(self) -> Settings:
@@ -134,6 +144,12 @@ class Settings(BaseSettings):
             raise ValueError("production requires RAG_BACKEND=milvus")
         if self.api_rate_limit_backend != "redis":
             raise ValueError("production requires API_RATE_LIMIT_BACKEND=redis")
+        if self.graph_backend != "nebula":
+            raise ValueError("production requires GRAPH_BACKEND=nebula")
+        if self.export_backend != "xlsx":
+            raise ValueError("production requires EXPORT_BACKEND=xlsx")
+        if self.ingestion_backend != "redis_stream":
+            raise ValueError("production requires INGESTION_BACKEND=redis_stream")
         if self.llm_reasoning_backend == "llm" and not self.llm_api_key.get_secret_value():
             raise ValueError("LLM_API_KEY is required when LLM_REASONING_BACKEND=llm")
         return self
@@ -146,6 +162,14 @@ class Settings(BaseSettings):
             raise ValueError("RAG_CHUNK_OVERLAP_CHARS must be smaller than RAG_CHUNK_SIZE_CHARS")
         if self.rag_rerank_top_k > self.rag_retrieval_top_k:
             raise ValueError("RAG_RERANK_TOP_K cannot exceed RAG_RETRIEVAL_TOP_K")
+        if (
+            self.ingestion_failed_payload_retention_days
+            > self.ingestion_job_retention_days
+        ):
+            raise ValueError(
+                "INGESTION_FAILED_PAYLOAD_RETENTION_DAYS cannot exceed "
+                "INGESTION_JOB_RETENTION_DAYS"
+            )
         return self
 
 

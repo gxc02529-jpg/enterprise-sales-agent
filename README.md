@@ -20,6 +20,7 @@
 - API、MCP 工具和 LLM 三层韧性保护：deadline、有限重试、独立熔断、并发舱壁与入口限流。
 - Milvus 3.x 文档 RAG：销售文档切片、BGE-M3、Dense+BM25、RRF、BGE-Reranker、双重权限过滤和引用返回。
 - 管理员文档摄取 API/MCP 工具；Embedding、Reranker 和 PyMilvus 采用惰性加载。
+- 可切换 PostgreSQL + Redis Stream 持久化摄取队列，支持消费者组、任务租约、重试、容量限制和崩溃接管。
 - 治理模型：个人记忆默认只生成 candidate；业务记忆激活必须带审核人。
 - PostgreSQL 初始化表、RLS 示例、Docker Compose 核心栈与 `full` 基础设施 profile。
 - 单元测试：路由、多工具融合、来源校验、鉴权 API。
@@ -68,7 +69,11 @@ LLM 管理接口仅限 `admin` 角色：
 GET  /v1/admin/llm/config   # 返回脱敏后的生效配置
 POST /v1/admin/llm/probe    # 发起一次最小模型连通性探测
 GET  /v1/admin/resilience   # 查看 API、工具、LLM 韧性状态
-POST /v1/admin/documents/ingest # 摄取已解析的销售文档
+POST /v1/admin/documents/ingest # 同步摄取已解析的销售文档
+POST /v1/admin/documents/jobs   # 上传文件并创建异步解析/索引任务
+GET  /v1/admin/documents/jobs/{job_id} # 查询摄取任务状态
+GET  /v1/admin/documents/jobs?status=failed # 按状态查看本租户任务
+POST /v1/admin/documents/jobs/{job_id}/retry # 人工重试失败/死信任务
 ```
 
 本地可以使用 `Authorization: Bearer dev-admin-token` 调试管理接口。生产环境必须关闭开发 token。
@@ -97,10 +102,19 @@ DATA_BACKEND=postgres
 CHECKPOINTER_BACKEND=postgres
 MEMORY_BACKEND=postgres
 AUDIT_BACKEND=postgres
+API_RATE_LIMIT_BACKEND=redis
+INGESTION_BACKEND=redis_stream
 LANGGRAPH_STRICT_MSGPACK=true
 ```
 
-其中 `DATA_BACKEND=postgres` 将销售指标工具切到真实数据库；设置 `RAG_BACKEND=milvus` 可启用真实文档检索。Graph 和 Export 仍保留显式开发适配器。生产环境会拒绝 Mock 数据后端、Mock RAG、内存 Checkpointer 或内存长期记忆配置。
+其中 `DATA_BACKEND=postgres` 将销售指标工具切到真实数据库；设置 `RAG_BACKEND=milvus` 可启用真实文档检索，`GRAPH_BACKEND=nebula` 和 `EXPORT_BACKEND=xlsx` 分别启用图谱与报表适配器。`INGESTION_BACKEND=redis_stream` 将上传任务状态和原文保存到 PostgreSQL，以 Redis Stream 调度多实例 Worker。生产环境会拒绝 Mock 数据/RAG/Graph/Export、内存 Checkpointer、内存长期记忆、单机内存限流或内存摄取队列。
+
+已有 PostgreSQL 数据卷不会重新执行容器初始化脚本。升级现有环境时需要幂等应用最新 schema：
+
+```powershell
+Get-Content .\deploy\postgres\init.sql |
+  docker compose exec -T postgres psql -U sales_agent -d sales_agent
+```
 
 导入幂等演示数据后即可验证 PostgreSQL 指标链路：
 
@@ -141,9 +155,11 @@ RAG_COLLECTION_NAME=sales_document_chunks
 RAG_EMBEDDING_DEVICE=cpu
 RAG_RETRIEVAL_TOP_K=20
 RAG_RERANK_TOP_K=5
+RAG_MIN_SCORE=0.35
+RAG_MIN_RETRIEVAL_SCORE=0.0
 ```
 
-详细数据模型、权限过滤和摄取流程见 [docs/rag-pipeline.md](docs/rag-pipeline.md)。超时、熔断、限流和降级语义见 [docs/resilience.md](docs/resilience.md)。
+详细数据模型、权限过滤和摄取流程见 [docs/rag-pipeline.md](docs/rag-pipeline.md)。Recall@K、MRR、负例拒答和权限泄漏门禁见 [docs/rag-evaluation.md](docs/rag-evaluation.md)。超时、熔断、限流和降级语义见 [docs/resilience.md](docs/resilience.md)。
 
 ## 目录
 
@@ -168,7 +184,7 @@ tests/              最小回归测试
 - LLM 永远不能提交可执行 SQL/nGQL。工具参数应映射到服务端 allow-list 查询模板。
 - `dev-token` 仅供本地使用；生产必须设置 `ALLOW_DEV_TOKEN=false`，轮换 JWT/MCP 密钥并使用 TLS。
 - PostgreSQL checkpointer 上线时应启用严格 msgpack 白名单并执行官方 `setup()` 初始化。
-- `/health` 是进程存活探针；`/ready` 会检查 MCP 必需工具是否完整可用。
+- `/health` 是进程存活探针；`/ready` 会检查 MCP 工具以及摄取任务的 PostgreSQL/Redis 依赖。
 
 ## GitHub 调研结论
 
@@ -189,4 +205,4 @@ tests/              最小回归测试
 
 ## 下一步
 
-推荐按 [docs/roadmap.md](docs/roadmap.md) 的顺序推进：下一阶段补 PDF/Word/Excel 解析 Worker、Redis 分布式限流和 RAG 评测集；随后接 NebulaGraph CDC 与审核后台。
+推荐按 [docs/roadmap.md](docs/roadmap.md) 的顺序推进：下一阶段补扫描件 OCR/MinerU、RAG 评测集和文档版本管理；随后接 NebulaGraph CDC、审核与版本回滚后台。

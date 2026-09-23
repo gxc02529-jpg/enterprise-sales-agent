@@ -56,6 +56,7 @@ dev = [
 [project.scripts]
 sales-agent-api = "sales_agent.api:run"
 sales-agent-mcp = "sales_agent.mcp_server:run"
+sales-agent-rag-eval = "sales_agent.evaluation.rag:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sales_agent"]

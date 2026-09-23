@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -18,6 +20,7 @@ def test_readiness() -> None:
     response = client.get("/ready")
     assert response.status_code == 200
     assert response.json()["backend"] == "MockToolGateway"
+    assert response.json()["ingestion"]["backend"] == "memory"
 
 
 def test_auth_required() -> None:
@@ -47,6 +50,50 @@ def test_production_rejects_mock_backends() -> None:
             tool_backend="mcp",
             data_backend="mock",
             checkpointer_backend="postgres",
+        )
+
+
+def _production_settings(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "app_env": "production",
+        "jwt_secret": "a-production-secret",
+        "mcp_service_token": "a-production-service-token",
+        "allow_dev_token": False,
+        "tool_backend": "mcp",
+        "data_backend": "postgres",
+        "checkpointer_backend": "postgres",
+        "memory_backend": "postgres",
+        "audit_backend": "postgres",
+        "rag_backend": "milvus",
+        "api_rate_limit_backend": "redis",
+        "graph_backend": "nebula",
+        "export_backend": "xlsx",
+        "ingestion_backend": "redis_stream",
+    }
+    values.update(overrides)
+    return values
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("graph_backend", "mock", "GRAPH_BACKEND=nebula"),
+        ("export_backend", "mock", "EXPORT_BACKEND=xlsx"),
+        ("ingestion_backend", "memory", "INGESTION_BACKEND=redis_stream"),
+    ],
+)
+def test_production_requires_real_graph_and_export_backends(
+    field: str, value: str, message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        Settings(**_production_settings(**{field: value}))
+
+
+def test_failed_payload_retention_cannot_exceed_job_retention() -> None:
+    with pytest.raises(ValidationError, match="FAILED_PAYLOAD_RETENTION"):
+        Settings(
+            ingestion_failed_payload_retention_days=91,
+            ingestion_job_retention_days=90,
         )
 
 
@@ -135,5 +182,107 @@ def test_sales_user_cannot_ingest_documents() -> None:
             "document_type": "visit_note",
             "text": "受控内容",
         },
+    )
+    assert response.status_code == 403
+
+
+def test_admin_upload_job_completes() -> None:
+    job_app = create_app(Settings())
+    with TestClient(job_app) as job_client:
+        created = job_client.post(
+            "/v1/admin/documents/jobs",
+            headers={"Authorization": "Bearer dev-admin-token"},
+            data={
+                "document_id": "visit-upload-001",
+                "title": "上传拜访纪要",
+                "document_type": "visit_note",
+                "permission_tags": '["sales:demo-sales-001"]',
+            },
+            files={"file": ("visit.md", "客户预算将在第四季度确认。", "text/markdown")},
+        )
+        assert created.status_code == 202
+        job_id = created.json()["job_id"]
+        body = created.json()
+        for _ in range(50):
+            current = job_client.get(
+                f"/v1/admin/documents/jobs/{job_id}",
+                headers={"Authorization": "Bearer dev-admin-token"},
+            )
+            assert current.status_code == 200
+            body = current.json()
+            if body["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+        assert body["status"] == "completed"
+        assert body["result"]["chunk_count"] == 1
+
+
+def test_document_job_id_must_be_uuid() -> None:
+    response = client.get(
+        "/v1/admin/documents/jobs/not-a-uuid",
+        headers={"Authorization": "Bearer dev-admin-token"},
+    )
+    assert response.status_code == 422
+
+
+def test_empty_document_upload_is_rejected() -> None:
+    response = client.post(
+        "/v1/admin/documents/jobs",
+        headers={"Authorization": "Bearer dev-admin-token"},
+        data={
+            "document_id": "empty-upload",
+            "title": "空文件",
+            "document_type": "visit_note",
+        },
+        files={"file": ("empty.md", b"", "text/markdown")},
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "DOCUMENT_EMPTY"
+
+
+def test_admin_can_list_and_retry_failed_document_job() -> None:
+    job_app = create_app(Settings())
+    headers = {"Authorization": "Bearer dev-admin-token"}
+    with TestClient(job_app) as job_client:
+        created = job_client.post(
+            "/v1/admin/documents/jobs",
+            headers=headers,
+            data={
+                "document_id": "failed-upload",
+                "title": "不支持格式",
+                "document_type": "visit_note",
+            },
+            files={"file": ("unsupported.zip", b"bad archive", "application/zip")},
+        )
+        assert created.status_code == 202
+        job_id = created.json()["job_id"]
+        body = created.json()
+        for _ in range(50):
+            body = job_client.get(
+                f"/v1/admin/documents/jobs/{job_id}", headers=headers
+            ).json()
+            if body["status"] == "failed":
+                break
+            time.sleep(0.01)
+        assert body["status"] == "failed"
+
+        listed = job_client.get(
+            "/v1/admin/documents/jobs?status=failed&limit=10", headers=headers
+        )
+        assert listed.status_code == 200
+        assert listed.json()["count"] == 1
+        assert listed.json()["items"][0]["job_id"] == job_id
+
+        retried = job_client.post(
+            f"/v1/admin/documents/jobs/{job_id}/retry", headers=headers
+        )
+        assert retried.status_code == 202
+        assert retried.json()["status"] == "queued"
+
+
+def test_sales_user_cannot_list_document_jobs() -> None:
+    response = client.get(
+        "/v1/admin/documents/jobs",
+        headers={"Authorization": "Bearer dev-token"},
     )
     assert response.status_code == 403

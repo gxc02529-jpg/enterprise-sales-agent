@@ -28,7 +28,9 @@ def test_quote_vid_escapes_quotes_and_backslashes() -> None:
 def test_build_graph_query_clamps_hops_and_escapes_vid() -> None:
     params = GraphQueryParams.model_construct(entity_name='华东"智造', max_hops=9)
     ngql, ctx = build_graph_query(_principal(), params)
+    assert "GET SUBGRAPH WITH PROP" in ngql
     assert "4 STEPS" in ngql
+    assert "BOTH MANAGES,SIGNED,CONTAINS,BELONGS_TO,BENCHMARKS" in ngql
     assert '华东\\"智造' in ngql
     assert ctx["tenant"] == "demo-tenant"
     assert ctx["is_admin"] is False
@@ -40,17 +42,58 @@ def test_build_graph_query_clamps_hops_and_escapes_vid() -> None:
 
 def test_filter_visible_paths_drops_cross_tenant() -> None:
     paths = [
-        {"edge": {"props": {"tenant_id": "demo-tenant"}}},
-        {"edge": {"props": {"tenant_id": "other-tenant"}}},
+        {
+            "edge": {
+                "props": {
+                    "tenant_id": "demo-tenant",
+                    "permission_tags": "region:east",
+                }
+            }
+        },
+        {
+            "edge": {
+                "props": {
+                    "tenant_id": "other-tenant",
+                    "permission_tags": "region:east",
+                }
+            }
+        },
         {"edge": {}},
     ]
     visible = filter_visible_paths(paths, _principal())
-    assert len(visible) == 2
+    assert len(visible) == 1
 
 
-def test_filter_visible_paths_admin_sees_all() -> None:
-    paths = [{"edge": {"props": {"tenant_id": "other-tenant"}}}]
-    assert len(filter_visible_paths(paths, _principal(roles=["admin"]))) == 1
+def test_filter_visible_paths_enforces_scope_and_limit() -> None:
+    paths = [
+        {
+            "edge": {
+                "props": {
+                    "tenant_id": "demo-tenant",
+                    "permission_tags": "region:east",
+                }
+            }
+        },
+        {
+            "edge": {
+                "props": {
+                    "tenant_id": "demo-tenant",
+                    "permission_tags": "region:south",
+                }
+            }
+        },
+    ]
+    assert len(filter_visible_paths(paths, _principal(), limit=1)) == 1
+
+
+def test_filter_visible_paths_admin_bypasses_scope_but_not_tenant() -> None:
+    paths = [
+        {"edge": {"props": {"tenant_id": "demo-tenant"}}},
+        {"edge": {"props": {"tenant_id": "other-tenant"}}},
+    ]
+    visible = filter_visible_paths(paths, _principal(roles=["admin"]))
+    assert len(visible) == 1
+    assert visible[0]["edge"]["props"]["tenant_id"] == "demo-tenant"
 
 
 @pytest.mark.asyncio

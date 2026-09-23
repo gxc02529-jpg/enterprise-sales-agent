@@ -12,9 +12,11 @@ CREATE TAG IF NOT EXISTS contract(contract_no string, tenant_id string, amount d
 CREATE TAG IF NOT EXISTS product(name string);
 CREATE TAG IF NOT EXISTS employee(name string, tenant_id string, department string);
 
-CREATE EDGE IF NOT EXISTS SIGNED(tenant_id string, signed_at string);
-CREATE EDGE IF NOT EXISTS CONTAINS(tenant_id string);
-CREATE EDGE IF NOT EXISTS MANAGES(tenant_id string);
+CREATE EDGE IF NOT EXISTS SIGNED(tenant_id string, signed_at string, permission_tags string);
+CREATE EDGE IF NOT EXISTS CONTAINS(tenant_id string, permission_tags string);
+CREATE EDGE IF NOT EXISTS MANAGES(tenant_id string, permission_tags string);
+CREATE EDGE IF NOT EXISTS BELONGS_TO(tenant_id string, permission_tags string);
+CREATE EDGE IF NOT EXISTS BENCHMARKS(tenant_id string, permission_tags string);
 
 -- 顶点：客户 / 合同 / 产品 / 销售
 INSERT VERTEX company(name, tenant_id, permission_tags)
@@ -37,18 +39,18 @@ INSERT VERTEX employee(name, tenant_id, department)
            "demo-sales-002":("演示销售二", "demo-tenant", "华南销售部");
 
 -- 边：客户 --SIGNED--> 合同 --CONTAINS--> 产品；销售 --MANAGES--> 客户
-INSERT EDGE SIGNED(tenant_id, signed_at)
-    VALUES "华东智造集团" -> "HT-2026-001":("demo-tenant", "2026-02-18"),
-           "华东智造集团" -> "HT-2026-018":("demo-tenant", "2026-06-12"),
-           "华东智造集团" -> "HT-2026-031":("demo-tenant", "2026-08-26"),
-           "华南精工科技" -> "HT-2026-044":("demo-tenant", "2026-09-01");
+INSERT EDGE SIGNED(tenant_id, signed_at, permission_tags)
+    VALUES "华东智造集团" -> "HT-2026-001":("demo-tenant", "2026-02-18", "sales:demo-sales-001,region:east"),
+           "华东智造集团" -> "HT-2026-018":("demo-tenant", "2026-06-12", "sales:demo-sales-001,region:east"),
+           "华东智造集团" -> "HT-2026-031":("demo-tenant", "2026-08-26", "sales:demo-sales-001,region:east"),
+           "华南精工科技" -> "HT-2026-044":("demo-tenant", "2026-09-01", "sales:demo-sales-002,region:south");
 
-INSERT EDGE CONTAINS(tenant_id)
-    VALUES "HT-2026-001" -> "工业视觉平台":("demo-tenant"),
-           "HT-2026-018" -> "工业视觉平台":("demo-tenant"),
-           "HT-2026-031" -> "智能运维平台":("demo-tenant"),
-           "HT-2026-044" -> "智能运维平台":("demo-tenant");
+INSERT EDGE CONTAINS(tenant_id, permission_tags)
+    VALUES "HT-2026-001" -> "工业视觉平台":("demo-tenant", "sales:demo-sales-001,region:east"),
+           "HT-2026-018" -> "工业视觉平台":("demo-tenant", "sales:demo-sales-001,region:east"),
+           "HT-2026-031" -> "智能运维平台":("demo-tenant", "sales:demo-sales-001,region:east"),
+           "HT-2026-044" -> "智能运维平台":("demo-tenant", "sales:demo-sales-002,region:south");
 
-INSERT EDGE MANAGES(tenant_id)
-    VALUES "demo-sales-001" -> "华东智造集团":("demo-tenant"),
-           "demo-sales-002" -> "华南精工科技":("demo-tenant");
+INSERT EDGE MANAGES(tenant_id, permission_tags)
+    VALUES "demo-sales-001" -> "华东智造集团":("demo-tenant", "sales:demo-sales-001,region:east"),
+           "demo-sales-002" -> "华南精工科技":("demo-tenant", "sales:demo-sales-002,region:south");

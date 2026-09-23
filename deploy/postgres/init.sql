@@ -57,6 +57,35 @@ CREATE TABLE IF NOT EXISTS document_metadata (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS document_ingestion_job (
+    job_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id text NOT NULL,
+    document_id text NOT NULL,
+    submitted_by text NOT NULL,
+    submitter_roles text[] NOT NULL DEFAULT '{}',
+    scope_tags text[] NOT NULL DEFAULT '{}',
+    filename text NOT NULL,
+    media_type text NOT NULL,
+    metadata jsonb NOT NULL,
+    content bytea,
+    status text NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued', 'parsing', 'indexing', 'completed', 'failed', 'dead_letter')),
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    locked_by text,
+    locked_at timestamptz,
+    error_code text,
+    result jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz
+);
+
+ALTER TABLE document_ingestion_job
+DROP CONSTRAINT IF EXISTS document_ingestion_job_status_check;
+ALTER TABLE document_ingestion_job
+ADD CONSTRAINT document_ingestion_job_status_check
+CHECK (status IN ('queued', 'parsing', 'indexing', 'completed', 'failed', 'dead_letter'));
+
 CREATE TABLE IF NOT EXISTS memory_record (
     memory_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id text NOT NULL,
@@ -113,14 +142,19 @@ CREATE INDEX IF NOT EXISTS idx_assignment_employee ON customer_assignment (tenan
 CREATE INDEX IF NOT EXISTS idx_memory_recall ON memory_record (tenant_id, layer, owner_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_audit_request ON audit_event (tenant_id, request_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_graph_review ON graph_change_request (tenant_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_ingestion_queue
+ON document_ingestion_job (status, created_at)
+WHERE status IN ('queued', 'parsing', 'indexing');
 
 ALTER TABLE customer ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sales_contract ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_metadata ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_ingestion_job ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_record ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer FORCE ROW LEVEL SECURITY;
 ALTER TABLE sales_contract FORCE ROW LEVEL SECURITY;
 ALTER TABLE document_metadata FORCE ROW LEVEL SECURITY;
+ALTER TABLE document_ingestion_job FORCE ROW LEVEL SECURITY;
 ALTER TABLE memory_record FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS customer_scope_policy ON customer;
@@ -152,6 +186,23 @@ USING (
     tenant_id = current_setting('app.tenant_id', true)
     AND (current_setting('app.is_admin', true) = 'true'
          OR permission_tags && string_to_array(current_setting('app.scope_tags', true), ','))
+);
+
+DROP POLICY IF EXISTS ingestion_job_scope_policy ON document_ingestion_job;
+CREATE POLICY ingestion_job_scope_policy ON document_ingestion_job
+USING (
+    current_setting('app.ingestion_worker', true) = 'true'
+    OR (
+        tenant_id = current_setting('app.tenant_id', true)
+        AND current_setting('app.is_admin', true) = 'true'
+    )
+)
+WITH CHECK (
+    current_setting('app.ingestion_worker', true) = 'true'
+    OR (
+        tenant_id = current_setting('app.tenant_id', true)
+        AND current_setting('app.is_admin', true) = 'true'
+    )
 );
 
 DROP POLICY IF EXISTS memory_scope_policy ON memory_record;

@@ -2,7 +2,13 @@ import asyncio
 
 import pytest
 
-from sales_agent.rate_limit import AdmissionPolicy, InMemoryAdmissionController, RateLimitExceeded
+from sales_agent.rate_limit import (
+    _RATE_SCRIPT,
+    AdmissionPolicy,
+    InMemoryAdmissionController,
+    RateLimitExceeded,
+    RedisAdmissionController,
+)
 from sales_agent.resilience import CircuitOpenError, ResiliencePolicy, ResilientExecutor
 
 
@@ -91,3 +97,49 @@ async def test_per_identity_rate_limit() -> None:
             pass
     async with controller.admit("tenant:other-user"):
         pass
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.rate_calls = 0
+        self.removed: list[tuple[str, str]] = []
+        self.closed = False
+
+    async def eval(self, script: str, numkeys: int, key: str, *args):
+        assert numkeys == 1
+        assert "tenant:user" not in key
+        if script == _RATE_SCRIPT:
+            self.rate_calls += 1
+            return [1, 0] if self.rate_calls == 1 else [0, 1500]
+        return 1
+
+    async def zrem(self, key: str, member: str) -> None:
+        self.removed.append((key, member))
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_redis_admission_uses_hashed_keys_and_releases_lease() -> None:
+    redis = _FakeRedis()
+    controller = RedisAdmissionController(
+        "redis://unused",
+        AdmissionPolicy(
+            requests_per_minute=1,
+            max_concurrent_per_identity=1,
+            concurrency_wait_seconds=0.1,
+        ),
+        prefix="test:admission",
+        client=redis,
+    )
+    async with controller.admit("tenant:user"):
+        pass
+    assert len(redis.removed) == 1
+    assert "tenant:user" not in redis.removed[0][0]
+    with pytest.raises(RateLimitExceeded) as exc_info:
+        async with controller.admit("tenant:user"):
+            pass
+    assert exc_info.value.retry_after_seconds == 2
+    await controller.close()
+    assert redis.closed

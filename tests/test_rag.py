@@ -1,6 +1,10 @@
 from sales_agent.contracts import DocumentIngestRequest, Principal, RagQueryParams
 from sales_agent.rag.chunking import chunk_document
-from sales_agent.rag.milvus import build_permission_filter, is_visible_hit
+from sales_agent.rag.milvus import (
+    build_permission_filter,
+    is_visible_hit,
+    select_candidates,
+)
 
 
 def _principal() -> Principal:
@@ -62,3 +66,12 @@ def test_client_side_permission_check_blocks_leaked_hit() -> None:
     leaked = {**authorized, "tenant_id": "other-tenant"}
     assert is_visible_hit(authorized, _principal(), params)
     assert not is_visible_hit(leaked, _principal(), params)
+
+
+def test_low_score_candidates_are_rejected_before_citation() -> None:
+    candidates = [
+        {"document_id": "weak", "score": 0.34},
+        {"document_id": "strong", "score": 0.82},
+    ]
+    selected = select_candidates(candidates, min_score=0.35, limit=5)
+    assert [item["document_id"] for item in selected] == ["strong"]

@@ -5,11 +5,21 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from time import perf_counter
-from typing import Annotated, Any
-from uuid import uuid4
+from typing import Annotated, Any, Literal
+from uuid import UUID, uuid4
 
 import uvicorn
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -20,6 +30,7 @@ from sales_agent.contracts import (
     AnalysisRequest,
     AnalysisResponse,
     DocumentIngestionJob,
+    DocumentIngestionJobPage,
     DocumentIngestRequest,
     DocumentIngestResponse,
     DocumentJobMetadata,
@@ -36,8 +47,9 @@ from sales_agent.observability import MetricsCollector
 from sales_agent.rag.ingestion import (
     DocumentTooLargeError,
     IngestionQueueFullError,
-    InMemoryIngestionCoordinator,
 )
+from sales_agent.rag.ingestion_factory import build_ingestion_coordinator
+from sales_agent.rag.parsers import DocumentParseError
 from sales_agent.rate_limit import (
     AdmissionController,
     ApiConcurrencyExceeded,
@@ -132,11 +144,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     audit_sink = build_audit_sink(settings)
     llm_provider = build_llm_provider(settings)
     admission = build_admission_controller(settings)
-    ingestion = InMemoryIngestionCoordinator(
-        gateway,
-        max_file_bytes=settings.ingestion_max_file_bytes,
-        queue_capacity=settings.ingestion_queue_capacity,
-    )
+    ingestion = build_ingestion_coordinator(gateway, settings)
 
     admitted_principal = AdmittedPrincipal(admission)
     admitted_dependency = Depends(admitted_principal)
@@ -237,6 +245,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content={"detail": "ingestion queue is full", "code": "INGESTION_SATURATED"},
         )
 
+    @app.exception_handler(DocumentParseError)
+    async def invalid_document(_: Request, exc: DocumentParseError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": "document cannot be parsed", "code": str(exc)},
+        )
+
     @app.middleware("http")
     async def audit_request(request: Request, call_next: Any) -> Any:
         started = perf_counter()
@@ -306,7 +321,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def ready() -> JSONResponse:
         try:
             details = await gateway.health()
-            ready_status = details.get("status") == "ok"
+            ingestion_details = await ingestion.health()
+            details = {**details, "ingestion": ingestion_details}
+            ready_status = (
+                details.get("status") == "ok"
+                and ingestion_details.get("status") == "ok"
+            )
         except Exception as exc:
             logger.error("readiness_failed", error_type=type(exc).__name__)
             details = {"status": "unavailable", "error_type": type(exc).__name__}
@@ -407,17 +427,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content=content,
         )
 
+    @app.get("/v1/admin/documents/jobs", response_model=DocumentIngestionJobPage)
+    async def list_document_jobs(
+        principal: Annotated[Principal, Depends(require_admin)],
+        job_status: Annotated[
+            Literal[
+                "queued",
+                "parsing",
+                "indexing",
+                "completed",
+                "failed",
+                "dead_letter",
+            ]
+            | None,
+            Query(alias="status"),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> DocumentIngestionJobPage:
+        jobs = await ingestion.list_jobs(principal, status=job_status, limit=limit)
+        return DocumentIngestionJobPage(items=jobs, count=len(jobs))
+
     @app.get("/v1/admin/documents/jobs/{job_id}", response_model=DocumentIngestionJob)
     async def get_document_job(
-        job_id: str,
+        job_id: UUID,
         principal: Annotated[Principal, Depends(require_admin)],
     ) -> DocumentIngestionJob:
         try:
-            return await ingestion.get(principal, job_id)
+            return await ingestion.get(principal, str(job_id))
         except KeyError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="document ingestion job not found",
+            ) from exc
+
+    @app.post(
+        "/v1/admin/documents/jobs/{job_id}/retry",
+        response_model=DocumentIngestionJob,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def retry_document_job(
+        job_id: UUID,
+        principal: Annotated[Principal, Depends(require_admin)],
+    ) -> DocumentIngestionJob:
+        try:
+            return await ingestion.retry(principal, str(job_id))
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "DOCUMENT_JOB_NOT_RETRYABLE"},
             ) from exc
 
     @app.post("/v1/analyze", response_model=AnalysisResponse)

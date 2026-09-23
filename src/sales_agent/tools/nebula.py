@@ -23,6 +23,15 @@ class GraphBackendUnavailable(RuntimeError):
     """Raised when the NebulaGraph backend cannot serve a graph_relations call."""
 
 
+RELATION_EDGE_TYPES = {
+    "RESPONSIBLE_FOR": "MANAGES",
+    "SIGNED": "SIGNED",
+    "CONTAINS": "CONTAINS",
+    "BELONGS_TO": "BELONGS_TO",
+    "BENCHMARKS": "BENCHMARKS",
+}
+
+
 def quote_vid(vid: str) -> str:
     """Escape a raw vertex id for safe inline use inside a double-quoted nGQL literal."""
     return '"' + vid.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -38,13 +47,21 @@ def build_graph_query(
     The filter context is applied client-side as defense-in-depth (NebulaGraph has no RLS).
     """
     vid = params.start_entity_id or params.entity_name or ""
+    if not vid:
+        raise ValueError("start_entity_id or entity_name is required")
     raw_hops = params.max_hops
     hops = max(1, min(int(raw_hops if raw_hops is not None else 2), 4))
-    ngql = f"GET SUBGRAPH {hops} STEPS FROM {quote_vid(vid)} BOTH YIELD VERTEX AS v, EDGE AS e"
+    requested = params.relation_types or list(RELATION_EDGE_TYPES)
+    edge_types = [RELATION_EDGE_TYPES[item] for item in requested]
+    ngql = (
+        f"GET SUBGRAPH WITH PROP {hops} STEPS FROM {quote_vid(vid)} "
+        f"BOTH {','.join(edge_types)} YIELD VERTICES AS v, EDGES AS e"
+    )
     filter_context = {
         "tenant": principal.tenant_id,
         "scope": set(principal.scope_tags),
         "is_admin": "admin" in principal.roles,
+        "limit": params.limit,
     }
     return ngql, filter_context
 
@@ -94,20 +111,38 @@ def parse_subgraph(resp: Any) -> list[dict[str, Any]]:
 
 
 def _path_visible(path: dict[str, Any], principal: Principal) -> bool:
+    edge_props = (path.get("edge") or {}).get("props") or {}
+    vertex_tags = (path.get("vertex") or {}).get("tags") or {}
+    property_sets = [
+        edge_props,
+        *[props for props in vertex_tags.values() if isinstance(props, dict)],
+    ]
+    tenants = {
+        str(props["tenant_id"])
+        for props in property_sets
+        if props.get("tenant_id") not in {None, ""}
+    }
+    # NebulaGraph has no RLS. Missing security metadata must fail closed.
+    if not tenants or tenants != {principal.tenant_id}:
+        return False
+    # An admin may bypass business scope tags, but never the tenant boundary.
     if "admin" in principal.roles:
         return True
-    edge = path.get("edge") or {}
-    props = edge.get("props") or {}
-    tenant = props.get("tenant_id")
-    if tenant is not None and tenant != principal.tenant_id:
-        return False
-    return True
+    permissions: set[str] = set()
+    for props in property_sets:
+        raw = props.get("permission_tags")
+        if isinstance(raw, str):
+            permissions.update(item.strip() for item in raw.split(",") if item.strip())
+        elif isinstance(raw, list):
+            permissions.update(str(item) for item in raw)
+    return bool(permissions.intersection(principal.scope_tags))
 
 
 def filter_visible_paths(
-    paths: list[dict[str, Any]], principal: Principal
+    paths: list[dict[str, Any]], principal: Principal, *, limit: int | None = None
 ) -> list[dict[str, Any]]:
-    return [path for path in paths if _path_visible(path, principal)]
+    visible = [path for path in paths if _path_visible(path, principal)]
+    return visible[:limit] if limit is not None else visible
 
 
 class NebulaGraphGateway(ToolGateway):
@@ -158,7 +193,7 @@ class NebulaGraphGateway(ToolGateway):
                 resp = session.execute(ngql)
                 if not resp.is_succeeded():
                     raise GraphBackendUnavailable(f"图查询失败: {resp.error_msg()}")
-                return filter_visible_paths(parse_subgraph(resp), principal)
+                return filter_visible_paths(parse_subgraph(resp), principal, limit=params.limit)
             finally:
                 session.release()
 

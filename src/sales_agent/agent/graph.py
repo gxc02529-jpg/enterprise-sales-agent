@@ -213,7 +213,15 @@ def build_sales_graph(
             elif result.route == Route.GRAPH:
                 sections.append(f"关系路径：{json.dumps(result.data, ensure_ascii=False)}")
             elif result.route == Route.RAG:
-                sections.append(f"文档证据：{json.dumps(result.data, ensure_ascii=False)}")
+                if result.data:
+                    sections.append(
+                        f"文档证据：{json.dumps(result.data, ensure_ascii=False)}"
+                    )
+                else:
+                    sections.append(
+                        "文档证据：未找到达到相关性阈值且当前用户有权访问的证据，"
+                        "因此暂不根据文档作答。"
+                    )
             else:
                 sections.append(f"报表导出：{json.dumps(result.data, ensure_ascii=False)}")
         memory_note = ""

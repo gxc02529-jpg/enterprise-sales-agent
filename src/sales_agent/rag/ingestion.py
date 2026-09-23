@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from sales_agent.contracts import (
@@ -26,7 +26,7 @@ class IngestionQueueFullError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class _Envelope:
+class IngestionEnvelope:
     job_id: str
     principal: Principal
     metadata: DocumentJobMetadata
@@ -35,14 +35,45 @@ class _Envelope:
     content: bytes
 
 
+class IngestionCoordinator(Protocol):
+    async def start(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def submit(
+        self,
+        principal: Principal,
+        metadata: DocumentJobMetadata,
+        *,
+        filename: str,
+        media_type: str,
+        content: bytes,
+    ) -> DocumentIngestionJob: ...
+
+    async def get(self, principal: Principal, job_id: str) -> DocumentIngestionJob: ...
+
+    async def list_jobs(
+        self, principal: Principal, *, status: str | None, limit: int
+    ) -> list[DocumentIngestionJob]: ...
+
+    async def retry(self, principal: Principal, job_id: str) -> DocumentIngestionJob: ...
+
+    async def health(self) -> dict[str, Any]: ...
+
+    def snapshot(self) -> dict[str, Any]: ...
+
+
 class InMemoryIngestionCoordinator:
     """Bounded development worker; the store/queue boundary is replaceable by PostgreSQL."""
 
     def __init__(self, gateway: ToolGateway, *, max_file_bytes: int, queue_capacity: int) -> None:
         self.gateway = gateway
         self.max_file_bytes = max_file_bytes
-        self.queue: asyncio.Queue[_Envelope | None] = asyncio.Queue(maxsize=queue_capacity)
+        self.queue: asyncio.Queue[IngestionEnvelope | None] = asyncio.Queue(
+            maxsize=queue_capacity
+        )
         self.jobs: dict[str, DocumentIngestionJob] = {}
+        self.envelopes: dict[str, IngestionEnvelope] = {}
         self._lock = asyncio.Lock()
         self._worker: asyncio.Task[None] | None = None
 
@@ -86,9 +117,11 @@ class InMemoryIngestionCoordinator:
         )
         async with self._lock:
             self.jobs[job_id] = job
-        self.queue.put_nowait(
-            _Envelope(job_id, principal, metadata, filename, media_type, content)
+        envelope = IngestionEnvelope(
+            job_id, principal, metadata, filename, media_type, content
         )
+        self.envelopes[job_id] = envelope
+        self.queue.put_nowait(envelope)
         return job
 
     async def get(self, principal: Principal, job_id: str) -> DocumentIngestionJob:
@@ -98,6 +131,51 @@ class InMemoryIngestionCoordinator:
             raise KeyError(job_id)
         return job
 
+    async def list_jobs(
+        self, principal: Principal, *, status: str | None, limit: int
+    ) -> list[DocumentIngestionJob]:
+        async with self._lock:
+            jobs = [
+                job
+                for job in self.jobs.values()
+                if job.tenant_id == principal.tenant_id
+                and (status is None or job.status == status)
+            ]
+        jobs.sort(key=lambda item: (item.created_at, item.job_id), reverse=True)
+        return jobs[:limit]
+
+    async def retry(self, principal: Principal, job_id: str) -> DocumentIngestionJob:
+        if self.queue.full():
+            raise IngestionQueueFullError("document ingestion queue is full")
+        async with self._lock:
+            job = self.jobs.get(job_id)
+            envelope = self.envelopes.get(job_id)
+            if (
+                job is None
+                or job.tenant_id != principal.tenant_id
+                or job.status not in {"failed", "dead_letter"}
+                or envelope is None
+            ):
+                raise KeyError(job_id)
+            retried = job.model_copy(
+                update={
+                    "status": "queued",
+                    "attempt_count": 0,
+                    "error_code": None,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            self.jobs[job_id] = retried
+        self.queue.put_nowait(envelope)
+        return retried
+
+    async def health(self) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "backend": "memory",
+            "worker_running": self._worker is not None and not self._worker.done(),
+        }
+
     async def _update(self, job_id: str, **changes: Any) -> None:
         async with self._lock:
             current = self.jobs[job_id]
@@ -105,19 +183,23 @@ class InMemoryIngestionCoordinator:
                 update={**changes, "updated_at": datetime.now(UTC)}
             )
 
-    async def _process(self, envelope: _Envelope) -> None:
-        await self._update(envelope.job_id, status="parsing")
+    async def _process(self, envelope: IngestionEnvelope) -> None:
+        current = await self.get(envelope.principal, envelope.job_id)
+        await self._update(
+            envelope.job_id,
+            status="parsing",
+            attempt_count=current.attempt_count + 1,
+        )
         text = await parse_document(envelope.filename, envelope.content)
         await self._update(envelope.job_id, status="indexing")
-        request = DocumentIngestRequest(
-            **envelope.metadata.model_dump(),
-            text=text,
-            source_uri=envelope.metadata.source_uri or f"upload://{envelope.filename}",
-        )
+        payload = envelope.metadata.model_dump()
+        payload["source_uri"] = payload.get("source_uri") or f"upload://{envelope.filename}"
+        request = DocumentIngestRequest(**payload, text=text)
         result = await self.gateway.ingest_document(
             envelope.principal, request, envelope.job_id
         )
         await self._update(envelope.job_id, status="completed", result=result)
+        self.envelopes.pop(envelope.job_id, None)
 
     async def _run(self) -> None:
         while True:

@@ -171,8 +171,16 @@ class DocumentIngestionJob(BaseModel):
     document_id: str
     filename: str
     media_type: str
-    status: Literal["queued", "parsing", "indexing", "completed", "failed"]
+    status: Literal[
+        "queued", "parsing", "indexing", "completed", "failed", "dead_letter"
+    ]
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    attempt_count: int = Field(default=0, ge=0)
     error_code: str | None = None
     result: DocumentIngestResponse | None = None
+
+
+class DocumentIngestionJobPage(BaseModel):
+    items: list[DocumentIngestionJob]
+    count: int = Field(ge=0)

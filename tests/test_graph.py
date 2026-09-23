@@ -2,7 +2,7 @@ import pytest
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from sales_agent.agent.graph import build_sales_graph
-from sales_agent.contracts import Route
+from sales_agent.contracts import RagQueryParams, Route, ToolResult
 from sales_agent.llm.provider import LLMGeneration
 from sales_agent.memory import InMemoryMemoryService
 from sales_agent.tools.mock import MockToolGateway
@@ -130,3 +130,43 @@ async def test_graph_can_use_pluggable_llm() -> None:
     assert result["routes"] == ["sql"]
     assert result["answer"].startswith("模型生成")
     assert result["llm_usage"]["total_tokens"] == 19
+
+
+class EmptyRagGateway(MockToolGateway):
+    async def search_documents(self, principal, params: RagQueryParams, request_id):
+        del principal, params, request_id
+        return ToolResult(
+            tool_name="search_documents",
+            route=Route.RAG,
+            data=[],
+            confidence=0.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_empty_rag_result_explicitly_refuses_unsupported_answer() -> None:
+    graph = build_sales_graph(EmptyRagGateway(), InMemoryMemoryService())
+    initial = {
+        "request_id": "req-empty-rag",
+        "session_id": "session-empty-rag",
+        "user_id": "sales-1",
+        "tenant_id": "tenant-1",
+        "roles": ["sales"],
+        "scope_tags": ["region:east"],
+        "query": "查找火星基地维护纪要",
+        "locale": "zh-CN",
+        "routes": [],
+        "memory_context": [],
+        "tool_results": [],
+        "citations": [],
+        "answer": "",
+        "errors": [],
+        "warnings": [],
+        "attempts": 0,
+        "status": "running",
+    }
+    result = await graph.ainvoke(
+        initial, config={"configurable": {"thread_id": "thread-empty-rag"}}
+    )
+    assert "暂不根据文档作答" in result["answer"]
+    assert result["status"] == "needs_human_review"

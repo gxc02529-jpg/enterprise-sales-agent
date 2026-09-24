@@ -6,6 +6,8 @@ from time import perf_counter
 from typing import Any
 
 from sales_agent.contracts import (
+    DocumentDeleteRequest,
+    DocumentDeleteResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
     GraphQueryParams,
@@ -46,6 +48,11 @@ class ToolGateway(ABC):
         self, principal: Principal, document: DocumentIngestRequest, request_id: str
     ) -> DocumentIngestResponse:
         raise NotImplementedError("document ingestion is not configured")
+
+    async def delete_document(
+        self, principal: Principal, document: DocumentDeleteRequest, request_id: str
+    ) -> DocumentDeleteResponse:
+        raise NotImplementedError("document deletion is not configured")
 
     async def health(self) -> dict[str, Any]:
         return {"status": "ok", "backend": type(self).__name__}
@@ -105,6 +112,7 @@ class MCPToolGateway(ToolGateway):
             "search_documents",
             "export_report",
             "ingest_document",
+            "delete_document",
         }
         async with Client(self.url, auth=self.service_token) as client:
             tools = await client.list_tools()
@@ -173,6 +181,19 @@ class MCPToolGateway(ToolGateway):
         )
         return DocumentIngestResponse.model_validate(payload)
 
+    async def delete_document(
+        self, principal: Principal, document: DocumentDeleteRequest, request_id: str
+    ) -> DocumentDeleteResponse:
+        payload = await self._call_payload(
+            "delete_document",
+            {
+                "principal": self._principal(principal),
+                "document": document.model_dump(mode="json"),
+                "request_id": request_id,
+            },
+        )
+        return DocumentDeleteResponse.model_validate(payload)
+
 
 def route_for_tool(tool_name: str) -> Route:
     return {
@@ -202,6 +223,7 @@ class ResilientToolGateway(ToolGateway):
                 "search_documents",
                 "export_report",
                 "ingest_document",
+                "delete_document",
             )
         }
 
@@ -266,6 +288,15 @@ class ResilientToolGateway(ToolGateway):
         return await self._invoke(
             "ingest_document",
             lambda: self.inner.ingest_document(principal, document, request_id),
+            retryable=False,
+        )
+
+    async def delete_document(
+        self, principal: Principal, document: DocumentDeleteRequest, request_id: str
+    ) -> DocumentDeleteResponse:
+        return await self._invoke(
+            "delete_document",
+            lambda: self.inner.delete_document(principal, document, request_id),
             retryable=False,
         )
 

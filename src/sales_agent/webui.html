@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>企业销售数据分析 Agent</title>
+<style>
+  :root { --accent:#0f9d58; --bg:#f5f6f8; --card:#fff; --bd:#e3e6ea; --txt:#1f2329; --sub:#6b7280; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+    font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { background:#fff; border-bottom:1px solid var(--bd); padding:14px 20px; display:flex; align-items:center; gap:10px; }
+  header .dot { width:10px; height:10px; border-radius:50%; background:var(--accent); }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .tag { margin-left:auto; font-size:12px; color:var(--sub); }
+  .wrap { max-width:880px; margin:18px auto; padding:0 16px; }
+  .panel { background:var(--card); border:1px solid var(--bd); border-radius:10px; padding:14px 16px; margin-bottom:14px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  label { font-size:12px; color:var(--sub); }
+  input, textarea { font-family:inherit; font-size:14px; border:1px solid var(--bd); border-radius:8px; padding:9px 11px; background:#fff; color:var(--txt); }
+  input { flex:1; min-width:160px; }
+  textarea { width:100%; min-height:70px; resize:vertical; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 18px; font-size:14px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:default; }
+  button.ghost { background:#fff; color:var(--txt); border:1px solid var(--bd); }
+  .answer { white-space:pre-wrap; line-height:1.6; font-size:14.5px; }
+  .routes span { display:inline-block; background:#e8f0fe; color:#1a56db; border-radius:10px; padding:2px 10px; font-size:12px; margin:3px 4px 0 0; }
+  .cite { border-left:3px solid var(--accent); background:#f0faf4; padding:8px 12px; border-radius:6px; margin:8px 0; font-size:13px; }
+  .cite b { color:#0b6b39; }
+  .warn { color:#9a6700; background:#fff8e1; border-radius:6px; padding:8px 12px; font-size:12.5px; margin:8px 0; }
+  .meta { font-size:12px; color:var(--sub); margin-top:6px; }
+  .conf { display:inline-block; font-size:13px; font-weight:600; border-radius:10px; padding:3px 12px; margin:10px 0 4px; }
+  .conf-high { background:#e8f0fe; color:#1a56db; }
+  .conf-mid { background:#fff8e1; color:#9a6700; }
+  .conf-low { background:#fdecea; color:#c0392b; }
+  .tools { font-size:12.5px; color:var(--sub); margin:8px 0; }
+  .tools b { color:var(--txt); }
+  details { margin-top:10px; }
+  details summary { cursor:pointer; font-size:12.5px; color:var(--sub); }
+  pre { background:#1e1e1e; color:#d4d4d4; padding:12px; border-radius:8px; overflow:auto; font-size:12px; max-height:320px; }
+  .status { font-size:13px; color:var(--sub); margin:6px 0; min-height:18px; }
+  .spinner { display:inline-block; width:12px; height:12px; border:2px solid #ccc; border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot"></span>
+  <h1>企业销售数据分析 Agent</h1>
+  <span class="tag">LangGraph · Mock 模式 · 同源托管界面</span>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <div class="row" style="margin-bottom:10px;">
+      <div style="flex:1; min-width:200px;">
+        <label>Token（默认 dev-token）</label>
+        <input id="token" value="dev-token" />
+      </div>
+      <div style="flex:1; min-width:200px;">
+        <label>Session ID</label>
+        <input id="session" value="demo-session" />
+      </div>
+    </div>
+    <label>分析问题</label>
+    <textarea id="query" placeholder="例如：统计季度销售额，并查找华东智造客户的关系和最近拜访纪要">统计季度销售额，并查找华东智造客户的关系和最近拜访纪要</textarea>
+    <div class="row" style="margin-top:10px;">
+      <button id="send">分析</button>
+      <button id="clear" class="ghost">清空</button>
+      <span class="status" id="status"></span>
+    </div>
+  </div>
+
+  <div class="panel" id="result" style="display:none;">
+    <div class="status" id="streamStatus"></div>
+    <div class="answer" id="answer"></div>
+    <div class="conf" id="conf" style="display:none;"></div>
+    <div class="routes" id="routes"></div>
+    <div id="cites"></div>
+    <div id="warns"></div>
+    <div class="tools" id="tools"></div>
+    <div class="meta" id="meta"></div>
+    <details>
+      <summary>查看完整 JSON 响应</summary>
+      <pre id="raw"></pre>
+    </details>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const API = location.origin;
+
+function setStatus(el, text, spin) {
+  el.innerHTML = (spin ? '<span class="spinner"></span>' : '') + (text || '');
+}
+
+async function run() {
+  const token = $('token').value.trim() || 'dev-token';
+  const session = $('session').value.trim() || 'demo-session';
+  const query = $('query').value.trim();
+  if (!query) { alert('请先输入分析问题'); return; }
+
+  $('send').disabled = true;
+  $('result').style.display = 'block';
+  $('answer').textContent = '';
+  $('routes').innerHTML = '';
+  $('cites').innerHTML = '';
+  $('warns').innerHTML = '';
+  $('tools').innerHTML = '';
+  $('conf').style.display = 'none';
+  $('raw').textContent = '';
+  $('meta').textContent = '';
+  setStatus($('status'), '正在调用 /v1/analyze/stream …', true);
+
+  const body = JSON.stringify({ query, session_id: session });
+
+  try {
+    const resp = await fetch(API + '/v1/analyze/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body
+    });
+    if (!resp.ok) {
+      const t = await resp.text();
+      setStatus($('status'), 'HTTP ' + resp.status + '：' + t, false);
+      $('send').disabled = false;
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', finalData = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const ev = parseEvent(block);
+        if (ev.type === 'progress') {
+          const p = ev.data || {};
+          setStatus($('streamStatus'), '路由：' + (p.routes || []).join('/') + ' · 工具结果 ' + (p.tool_count||0) + ' · 尝试 ' + (p.attempts||0), false);
+        } else if (ev.type === 'completed') {
+          finalData = ev.data;
+        }
+      }
+    }
+    if (finalData) render(finalData);
+    setStatus($('status'), '完成', false);
+  } catch (e) {
+    // 流式失败，回退到同步接口
+    try {
+      setStatus($('status'), '流式失败，回退 /v1/analyze …', false);
+      const r2 = await fetch(API + '/v1/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body
+      });
+      const d = await r2.json();
+      render(d);
+      setStatus($('status'), '完成（同步接口）', false);
+    } catch (e2) {
+      setStatus($('status'), '请求失败：' + e2.message, false);
+    }
+  } finally {
+    $('send').disabled = false;
+  }
+}
+
+function parseEvent(block) {
+  let type = '', dataStr = '';
+  block.split('\n').forEach(line => {
+    if (line.startsWith('event:')) type = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+  });
+  let data = null;
+  try { data = JSON.parse(dataStr); } catch (_) {}
+  return { type, data };
+}
+
+function render(d) {
+  $('answer').textContent = d.answer || '';
+  $('routes').innerHTML = (d.routes || []).map(r => '<span>' + r + '</span>').join('');
+  // 回答级置信度徽标
+  const c = (typeof d.confidence === 'number') ? d.confidence : null;
+  if (c === null) {
+    $('conf').style.display = 'none';
+  } else {
+    const pct = Math.round(c * 100);
+    $('conf').className = 'conf ' + (c >= 0.75 ? 'conf-high' : (c >= 0.55 ? 'conf-mid' : 'conf-low'));
+    $('conf').style.display = 'inline-block';
+    $('conf').textContent = '总体置信度 ' + pct + '%' + (c < 0.55 ? ' · 建议人工复核' : '');
+  }
+  // 各工具分项置信度
+  const tools = (d.tool_results || []).map(t => {
+    const tc = (typeof t.confidence === 'number') ? Math.round(t.confidence * 100) : '—';
+    const route = t.route || (t.tool_name || '?');
+    const sim = t.simulated ? '（模拟）' : '';
+    return '<span><b>' + route + '</b> ' + tc + '%' + sim + '</span>';
+  }).join(' · ');
+  $('tools').innerHTML = tools ? ('工具分项置信度：' + tools) : '';
+  const cites = (d.citations || []).map(c =>
+    '<div class="cite"><b>[' + (c.source_type||'?') + ']</b> ' + (c.label||'') +
+    (c.excerpt ? ' — ' + c.excerpt : '') + '<br><span style="color:#6b7280">来源：' + (c.source_id||'') + (c.locator?(' · '+c.locator):'') + '</span></div>'
+  ).join('');
+  $('cites').innerHTML = cites;
+  $('warns').innerHTML = (d.warnings || []).map(w => '<div class="warn">⚠ ' + w + '</div>').join('');
+  $('meta').textContent = 'request_id：' + (d.request_id||'') + ' · status：' + (d.status||'') +
+    (d.llm_usage && Object.keys(d.llm_usage).length ? ' · token：' + JSON.stringify(d.llm_usage) : '');
+  $('raw').textContent = JSON.stringify(d, null, 2);
+}
+
+$('send').addEventListener('click', run);
+$('clear').addEventListener('click', () => {
+  $('query').value = '';
+  $('result').style.display = 'none';
+  setStatus($('status'), '');
+});
+</script>
+</body>
+</html>

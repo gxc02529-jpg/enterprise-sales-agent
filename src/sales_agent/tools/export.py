@@ -9,6 +9,8 @@ from typing import Any
 from sales_agent.config import Settings
 from sales_agent.contracts import (
     Citation,
+    DocumentDeleteRequest,
+    DocumentDeleteResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
     GraphQueryParams,
@@ -151,6 +153,11 @@ class ExcelExportGateway(ToolGateway):
         self, principal: Principal, document: DocumentIngestRequest, request_id: str
     ) -> DocumentIngestResponse:
         return await self.inner.ingest_document(principal, document, request_id)
+
+    async def delete_document(
+        self, principal: Principal, document: DocumentDeleteRequest, request_id: str
+    ) -> DocumentDeleteResponse:
+        return await self.inner.delete_document(principal, document, request_id)
 
     async def health(self) -> dict[str, Any]:
         base = await self.inner.health()

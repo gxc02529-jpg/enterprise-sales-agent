@@ -13,6 +13,11 @@ class AgentState(TypedDict, total=False):
     query: str
     locale: str
     routes: list[str]
+    routing_confidence: float
+    routing_backend: str
+    resolved_entity_name: str
+    clarification: dict[str, Any] | None
+    clarification_answers: dict[str, Any]
     memory_context: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
     citations: list[dict[str, Any]]
@@ -21,4 +26,6 @@ class AgentState(TypedDict, total=False):
     warnings: list[str]
     llm_usage: dict[str, int]
     attempts: int
-    status: Literal["running", "completed", "needs_human_review", "failed"]
+    status: Literal[
+        "running", "needs_clarification", "completed", "needs_human_review", "failed"
+    ]

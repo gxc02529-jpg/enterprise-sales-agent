@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import socket
@@ -16,15 +17,25 @@ from sales_agent.contracts import (
     DocumentIngestRequest,
     DocumentIngestResponse,
     DocumentJobMetadata,
+    DocumentVersionPage,
+    DocumentVersionRecord,
     Principal,
 )
 from sales_agent.logging import logger
+from sales_agent.rag.chunking import normalize_text
 from sales_agent.rag.ingestion import (
     DocumentTooLargeError,
     IngestionEnvelope,
     IngestionQueueFullError,
 )
 from sales_agent.rag.parsers import DocumentParseError, parse_document
+from sales_agent.rag.versioning import (
+    DocumentVersionBusyError,
+    DocumentVersionConflictError,
+    VersionDecision,
+    VersionHead,
+    decide_version,
+)
 from sales_agent.tools.gateway import ToolGateway
 
 
@@ -235,6 +246,58 @@ class PostgresIngestionJobStore:
             )
         return [self._job(row) for row in rows]
 
+    async def list_versions(
+        self, principal: Principal, document_id: str, *, limit: int
+    ) -> DocumentVersionPage:
+        pool = await self._get_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await self._set_principal(connection, principal)
+            head = await connection.fetchrow(
+                """
+                SELECT status, active_version, pending_version
+                FROM knowledge_document
+                WHERE tenant_id = $1 AND document_id = $2
+                """,
+                principal.tenant_id,
+                document_id,
+            )
+            if head is None:
+                return DocumentVersionPage(document_id=document_id, status="untracked")
+            rows = await connection.fetch(
+                """
+                SELECT document_id, version, content_hash, source_updated_at,
+                       status, job_id, indexed_at, created_at
+                FROM knowledge_document_version
+                WHERE tenant_id = $1 AND document_id = $2
+                ORDER BY source_updated_at DESC, created_at DESC
+                LIMIT $3
+                """,
+                principal.tenant_id,
+                document_id,
+                limit,
+            )
+        items = [
+            DocumentVersionRecord(
+                document_id=row["document_id"],
+                version=row["version"],
+                content_hash=row["content_hash"],
+                source_updated_at=row["source_updated_at"],
+                status=row["status"],
+                job_id=str(row["job_id"]) if row["job_id"] else None,
+                indexed_at=row["indexed_at"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+        return DocumentVersionPage(
+            document_id=document_id,
+            status=head["status"],
+            active_version=head["active_version"],
+            pending_version=head["pending_version"],
+            items=items,
+            count=len(items),
+        )
+
     async def retry(
         self, principal: Principal, job_id: str
     ) -> tuple[DocumentIngestionJob, RetrySnapshot]:
@@ -340,12 +403,204 @@ class PostgresIngestionJobStore:
                 worker_id,
             )
 
+    async def reserve_version(
+        self,
+        job_id: str,
+        worker_id: str,
+        metadata: DocumentJobMetadata,
+        content_hash: str,
+    ) -> VersionDecision:
+        """Serialize one document's version transition before external indexing."""
+
+        pool = await self._get_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await self._set_worker(connection)
+            job = await connection.fetchrow(
+                """
+                SELECT tenant_id, document_id, created_at
+                FROM document_ingestion_job
+                WHERE job_id = $1::uuid AND locked_by = $2 AND status = 'parsing'
+                """,
+                job_id,
+                worker_id,
+            )
+            if job is None:
+                raise RuntimeError("ingestion job lease was lost")
+            source_updated_at = metadata.source_updated_at or job["created_at"]
+            await connection.execute(
+                """
+                INSERT INTO knowledge_document (tenant_id, document_id, status)
+                VALUES ($1, $2, 'updating')
+                ON CONFLICT (tenant_id, document_id) DO NOTHING
+                """,
+                job["tenant_id"],
+                job["document_id"],
+            )
+            row = await connection.fetchrow(
+                """
+                SELECT active_version, active_content_hash,
+                       active_source_updated_at, pending_job_id,
+                       pending_source_updated_at
+                FROM knowledge_document
+                WHERE tenant_id = $1 AND document_id = $2
+                FOR UPDATE
+                """,
+                job["tenant_id"],
+                job["document_id"],
+            )
+            head = VersionHead(
+                active_version=row["active_version"],
+                active_content_hash=row["active_content_hash"],
+                active_source_updated_at=row["active_source_updated_at"],
+                pending_job_id=(str(row["pending_job_id"]) if row["pending_job_id"] else None),
+                pending_source_updated_at=row["pending_source_updated_at"],
+            )
+            decision = decide_version(
+                head,
+                job_id=job_id,
+                version=metadata.version,
+                content_hash=content_hash,
+                source_updated_at=source_updated_at,
+            )
+            if decision != VersionDecision.PROCEED:
+                return decision
+            existing = await connection.fetchrow(
+                """
+                SELECT content_hash
+                FROM knowledge_document_version
+                WHERE tenant_id = $1 AND document_id = $2 AND version = $3
+                FOR UPDATE
+                """,
+                job["tenant_id"],
+                job["document_id"],
+                metadata.version,
+            )
+            if existing is not None and existing["content_hash"] != content_hash:
+                return VersionDecision.CONFLICT
+            await connection.execute(
+                """
+                INSERT INTO knowledge_document_version (
+                    tenant_id, document_id, version, content_hash,
+                    source_updated_at, job_id, status, metadata
+                ) VALUES ($1, $2, $3, $4, $5, $6::uuid, 'pending', $7::jsonb)
+                ON CONFLICT (tenant_id, document_id, version) DO UPDATE
+                SET job_id = EXCLUDED.job_id, status = 'pending',
+                    source_updated_at = EXCLUDED.source_updated_at,
+                    metadata = EXCLUDED.metadata, updated_at = now()
+                """,
+                job["tenant_id"],
+                job["document_id"],
+                metadata.version,
+                content_hash,
+                source_updated_at,
+                job_id,
+                metadata.model_dump_json(),
+            )
+            await connection.execute(
+                """
+                UPDATE knowledge_document
+                SET status = 'updating', pending_version = $3,
+                    pending_job_id = $4::uuid, pending_source_updated_at = $5,
+                    updated_at = now()
+                WHERE tenant_id = $1 AND document_id = $2
+                """,
+                job["tenant_id"],
+                job["document_id"],
+                metadata.version,
+                job_id,
+                source_updated_at,
+            )
+        return VersionDecision.PROCEED
+
     async def complete(
         self, job_id: str, worker_id: str, result: DocumentIngestResponse
     ) -> None:
         pool = await self._get_pool()
         async with pool.acquire() as connection, connection.transaction():
             await self._set_worker(connection)
+            job = await connection.fetchrow(
+                """
+                SELECT tenant_id, document_id, metadata, created_at
+                FROM document_ingestion_job
+                WHERE job_id = $1::uuid AND locked_by = $2
+                FOR UPDATE
+                """,
+                job_id,
+                worker_id,
+            )
+            if job is None:
+                raise RuntimeError("ingestion job lease was lost")
+            metadata = DocumentJobMetadata.model_validate(_json_value(job["metadata"]))
+            source_updated_at = metadata.source_updated_at or job["created_at"]
+            pending_job_id = await connection.fetchval(
+                """
+                SELECT pending_job_id
+                FROM knowledge_document
+                WHERE tenant_id = $1 AND document_id = $2
+                """,
+                job["tenant_id"],
+                job["document_id"],
+            )
+            owns_pending = pending_job_id is not None and str(pending_job_id) == job_id
+            if result.status in {"indexed", "unchanged"} and owns_pending:
+                await connection.execute(
+                    """
+                    UPDATE knowledge_document_version
+                    SET status = 'superseded', updated_at = now()
+                    WHERE tenant_id = $1 AND document_id = $2
+                      AND status = 'active' AND version <> $3
+                    """,
+                    job["tenant_id"],
+                    job["document_id"],
+                    metadata.version,
+                )
+                await connection.execute(
+                    """
+                    UPDATE knowledge_document_version
+                    SET status = 'active', indexed_at = now(), updated_at = now()
+                    WHERE tenant_id = $1 AND document_id = $2
+                      AND version = $3 AND job_id = $4::uuid
+                    """,
+                    job["tenant_id"],
+                    job["document_id"],
+                    metadata.version,
+                    job_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE knowledge_document
+                    SET status = 'active', active_version = $3,
+                        active_content_hash = $4,
+                        active_source_updated_at = $5,
+                        pending_version = NULL, pending_job_id = NULL,
+                        pending_source_updated_at = NULL, updated_at = now()
+                    WHERE tenant_id = $1 AND document_id = $2
+                      AND pending_job_id = $6::uuid
+                    """,
+                    job["tenant_id"],
+                    job["document_id"],
+                    metadata.version,
+                    result.content_hash,
+                    source_updated_at,
+                    job_id,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO knowledge_outbox (
+                        tenant_id, aggregate_id, event_type, payload
+                    ) VALUES ($1, $2, 'knowledge.document.activated', $3::jsonb)
+                    """,
+                    job["tenant_id"],
+                    job["document_id"],
+                    json.dumps(
+                        {
+                            "document_id": job["document_id"],
+                            "version": metadata.version,
+                            "content_hash": result.content_hash,
+                            "job_id": job_id,
+                        }
+                    ),
+                )
             await connection.execute(
                 """
                 UPDATE document_ingestion_job
@@ -393,9 +648,50 @@ class PostgresIngestionJobStore:
                 retryable,
                 max_attempts,
             )
+            if row is not None and row["status"] in {"failed", "dead_letter"}:
+                await connection.execute(
+                    """
+                    UPDATE knowledge_document_version
+                    SET status = 'failed', updated_at = now()
+                    WHERE job_id = $1::uuid AND status = 'pending'
+                    """,
+                    job_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE knowledge_document
+                    SET status = CASE WHEN active_version IS NULL THEN 'failed' ELSE 'active' END,
+                        pending_version = NULL, pending_job_id = NULL,
+                        pending_source_updated_at = NULL, updated_at = now()
+                    WHERE pending_job_id = $1::uuid
+                    """,
+                    job_id,
+                )
         if row is None:
             return "failed"
         return row["status"]
+
+    async def defer_busy_version(
+        self, job_id: str, worker_id: str, error_code: str
+    ) -> None:
+        """Return a version-contention job to the queue without spending an attempt."""
+
+        pool = await self._get_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await self._set_worker(connection)
+            await connection.execute(
+                """
+                UPDATE document_ingestion_job
+                SET status = 'queued',
+                    attempt_count = GREATEST(attempt_count - 1, 0),
+                    error_code = $3, locked_by = NULL, locked_at = NULL,
+                    updated_at = now()
+                WHERE job_id = $1::uuid AND locked_by = $2
+                """,
+                job_id,
+                worker_id,
+                error_code[:128],
+            )
 
     async def queued_job_ids(self, limit: int) -> list[str]:
         pool = await self._get_pool()
@@ -637,6 +933,11 @@ class RedisStreamIngestionCoordinator:
         for job_id in await self.store.queued_job_ids(self.queue_capacity):
             await self._enqueue(job_id)
 
+    async def list_versions(
+        self, principal: Principal, document_id: str, *, limit: int
+    ) -> DocumentVersionPage:
+        return await self.store.list_versions(principal, document_id, limit=limit)
+
     async def _enqueue(self, job_id: str, *, reset: bool = False) -> Any:
         return await self.client.eval(
             _ENQUEUE_SCRIPT,
@@ -688,6 +989,44 @@ class RedisStreamIngestionCoordinator:
         release_capacity = False
         try:
             text = await parse_document(envelope.filename, envelope.content)
+            content_hash = hashlib.sha256(
+                normalize_text(text).encode("utf-8")
+            ).hexdigest()
+            reserve_version = getattr(self.store, "reserve_version", None)
+            if reserve_version is not None:
+                decision = await reserve_version(
+                    job_id,
+                    self.consumer_name,
+                    envelope.metadata,
+                    content_hash,
+                )
+                if decision == VersionDecision.CONFLICT:
+                    raise DocumentVersionConflictError(
+                        "the same document version has different content"
+                    )
+                if decision == VersionDecision.BUSY:
+                    raise DocumentVersionBusyError(
+                        "a newer document generation is currently being indexed"
+                    )
+                if decision in {VersionDecision.UNCHANGED, VersionDecision.SUPERSEDED}:
+                    result = DocumentIngestResponse(
+                        document_id=envelope.metadata.document_id,
+                        content_hash=content_hash,
+                        chunk_count=0,
+                        row_count=0,
+                        status=(
+                            "unchanged"
+                            if decision == VersionDecision.UNCHANGED
+                            else "superseded"
+                        ),
+                    )
+                    await self.store.complete(job_id, self.consumer_name, result)
+                    self._processed += 1
+                    release_capacity = True
+                    await self._ack_delete(
+                        message_id, job_id=job_id, release=release_capacity
+                    )
+                    return
             await self.store.mark_indexing(job_id, self.consumer_name)
             payload = envelope.metadata.model_dump()
             payload["source_uri"] = payload.get("source_uri") or (
@@ -702,8 +1041,31 @@ class RedisStreamIngestionCoordinator:
             release_capacity = True
         except asyncio.CancelledError:
             raise
+        except DocumentVersionBusyError as exc:
+            defer = getattr(self.store, "defer_busy_version", None)
+            if defer is None:
+                outcome = await self.store.fail_or_retry(
+                    job_id,
+                    self.consumer_name,
+                    type(exc).__name__,
+                    retryable=True,
+                    max_attempts=self.max_attempts,
+                )
+                if outcome != "queued":
+                    self._failed += 1
+                    release_capacity = True
+            else:
+                await defer(job_id, self.consumer_name, type(exc).__name__)
+            if not release_capacity:
+                # Small contention backoff prevents an immediate hot loop while the
+                # current generation finishes. It does not consume a retry attempt.
+                await asyncio.sleep(0.1)
+                await self.client.xadd(self.stream_name, {"job_id": job_id})
+            logger.info("document_version_deferred", job_id=job_id)
         except Exception as exc:
-            retryable = not isinstance(exc, DocumentParseError)
+            retryable = not isinstance(
+                exc, (DocumentParseError, DocumentVersionConflictError)
+            )
             error_code = (
                 str(exc) if isinstance(exc, DocumentParseError) else type(exc).__name__
             )

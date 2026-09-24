@@ -13,4 +13,4 @@ exports/
 .idea/
 .vscode/
 .workbuddy/
-
+*.log

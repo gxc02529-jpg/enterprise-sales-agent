@@ -5,6 +5,8 @@ from typing import Any
 
 from sales_agent.contracts import (
     Citation,
+    DocumentDeleteRequest,
+    DocumentDeleteResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
     GraphQueryParams,
@@ -65,6 +67,12 @@ class MilvusRagGateway(ToolGateway):
     ) -> DocumentIngestResponse:
         del request_id
         return await self.rag.ingest(principal, document)
+
+    async def delete_document(
+        self, principal: Principal, document: DocumentDeleteRequest, request_id: str
+    ) -> DocumentDeleteResponse:
+        del request_id
+        return await self.rag.delete(principal, document)
 
     async def export_report(
         self, principal: Principal, payload: dict[str, Any], request_id: str

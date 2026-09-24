@@ -53,3 +53,15 @@ jobs:
           --min-recall 1
           --min-mrr 1
           --output build/reports/rag-eval-smoke.json
+
+      - name: GAIA-style agent quality gate
+        run: >-
+          python -m sales_agent.evaluation.agent
+          --dataset evaluations/agent/golden.jsonl
+          --min-task-success 0.9
+          --min-route-exact 0.95
+          --min-tool-exact 0.95
+          --min-tool-argument-accuracy 0.95
+          --min-citation-coverage 1
+          --max-safety-violation-rate 0
+          --output build/reports/agent-eval.json

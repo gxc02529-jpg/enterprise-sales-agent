@@ -17,9 +17,15 @@
 - 可切换 PostgreSQL 审计 Sink；HTTP 请求与 MCP 工具调用使用摘要指纹留痕，避免日志保存原始敏感入参。
 - 可插拔 OpenAI-compatible LLM Provider，兼容自定义地址、模型、超时、重试和 token 预算。
 - 规则/LLM 双模式路由与融合；LLM 故障自动降级，响应返回累计 token usage。
+- Prompt 文件注册中心：版本、`zh-CN/en-US`、变量校验、热重载与配置回滚，不再硬编码在 Provider。
+- LangGraph `interrupt/Command(resume)` 澄清闭环：信息不足时持久化暂停，补充实体后原地续跑，暂停前不调用工具。
+- 可选 Laya 本地意图路由：多标签判定、置信阈值、规则降级；中文由 multilingual checkpoint 处理。
 - API、MCP 工具和 LLM 三层韧性保护：deadline、有限重试、独立熔断、并发舱壁与入口限流。
 - Milvus 3.x 文档 RAG：销售文档切片、BGE-M3、Dense+BM25、RRF、BGE-Reranker、双重权限过滤和引用返回。
 - 管理员文档摄取 API/MCP 工具；Embedding、Reranker 和 PyMilvus 采用惰性加载。
+- 知识库高频更新：正文/元数据幂等、版本引用、新旧索引切换、ACL fail-closed、显式文档下线。
+- PostgreSQL 文档 head/版本账本：摄取前版本预占、乱序事件淘汰、同版本冲突拒绝、事务内 active 切换与 outbox 事件。
+- GAIA-style Agent 分级评测：端到端任务成功率、BFCL-style 工具/参数准确率、澄清、失败恢复、引用与安全硬门禁。
 - 可切换 PostgreSQL + Redis Stream 持久化摄取队列，支持消费者组、任务租约、重试、容量限制和崩溃接管。
 - 治理模型：个人记忆默认只生成 candidate；业务记忆激活必须带审核人。
 - PostgreSQL 初始化表、RLS 示例、Docker Compose 核心栈与 `full` 基础设施 profile。
@@ -74,6 +80,9 @@ POST /v1/admin/documents/jobs   # 上传文件并创建异步解析/索引任务
 GET  /v1/admin/documents/jobs/{job_id} # 查询摄取任务状态
 GET  /v1/admin/documents/jobs?status=failed # 按状态查看本租户任务
 POST /v1/admin/documents/jobs/{job_id}/retry # 人工重试失败/死信任务
+DELETE /v1/admin/documents/{document_id} # 按租户下线文档全部索引版本
+GET  /v1/admin/documents/{document_id}/versions # 查看 active/pending 与版本历史
+GET  /v1/admin/prompts # 查看 Prompt 版本、语言和 active 状态
 ```
 
 本地可以使用 `Authorization: Bearer dev-admin-token` 调试管理接口。生产环境必须关闭开发 token。
@@ -144,6 +153,8 @@ LLM_BUDGET_TOKENS=12000
 
 Router 和 synthesis 模型留空时继承 `LLM_MODEL`。配置 API 永远不会返回 API Key；当前配置来源是环境变量或密钥管理系统，修改后重启服务生效。Provider 扩展点位于 `src/sales_agent/llm/provider.py`，完整契约见 [docs/llm-integration.md](docs/llm-integration.md)。
 
+Prompt 正文位于 `config/prompts.json`，可独立发布、热重载和版本回滚；意图路由与澄清流程见 [docs/prompt-intent-clarification.md](docs/prompt-intent-clarification.md)。
+
 ## RAG 与韧性配置
 
 真实 RAG 需要安装 `.[infra,rag]` 并设置：
@@ -159,7 +170,9 @@ RAG_MIN_SCORE=0.35
 RAG_MIN_RETRIEVAL_SCORE=0.0
 ```
 
-详细数据模型、权限过滤和摄取流程见 [docs/rag-pipeline.md](docs/rag-pipeline.md)。Recall@K、MRR、负例拒答和权限泄漏门禁见 [docs/rag-evaluation.md](docs/rag-evaluation.md)。超时、熔断、限流和降级语义见 [docs/resilience.md](docs/resilience.md)。
+详细数据模型、权限过滤和摄取流程见 [docs/rag-pipeline.md](docs/rag-pipeline.md)，高频更新与版本一致性边界见 [docs/knowledge-update.md](docs/knowledge-update.md)。Recall@K、MRR、负例拒答和权限泄漏门禁见 [docs/rag-evaluation.md](docs/rag-evaluation.md)。超时、熔断、限流和降级语义见 [docs/resilience.md](docs/resilience.md)。
+
+端到端 Agent 评测与 GAIA/BFCL/AgentBench/Ragas 的映射见 [docs/agent-evaluation.md](docs/agent-evaluation.md)。
 
 ## 目录
 

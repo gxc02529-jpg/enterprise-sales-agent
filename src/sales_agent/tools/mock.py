@@ -6,6 +6,8 @@ from typing import Any
 
 from sales_agent.contracts import (
     Citation,
+    DocumentDeleteRequest,
+    DocumentDeleteResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
     GraphQueryParams,
@@ -159,4 +161,16 @@ class MockToolGateway(ToolGateway):
             row_count=len(chunks),
             status="simulated",
             elapsed_ms=int((perf_counter() - started) * 1000),
+        )
+
+    async def delete_document(
+        self, principal: Principal, document: DocumentDeleteRequest, request_id: str
+    ) -> DocumentDeleteResponse:
+        del request_id
+        self._require_scope(principal)
+        return DocumentDeleteResponse(
+            document_id=document.document_id,
+            status="simulated",
+            deleted_chunks=0,
+            row_count=0,
         )

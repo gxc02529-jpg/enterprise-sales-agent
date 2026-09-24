@@ -13,6 +13,7 @@ from sales_agent.rag.ingestion_durable import (
     RetrySnapshot,
 )
 from sales_agent.rag.ingestion_factory import build_ingestion_coordinator
+from sales_agent.rag.versioning import VersionDecision
 from sales_agent.tools.mock import MockToolGateway
 
 
@@ -43,6 +44,9 @@ class _FakeStore:
         self.envelope: IngestionEnvelope | None = None
         self.failure_outcome = "failed"
         self.restored: list[tuple[str, RetrySnapshot]] = []
+        self.version_decision = VersionDecision.PROCEED
+        self.reservations: list[tuple[str, str]] = []
+        self.deferred: list[str] = []
 
     async def create(self, job, principal, metadata, content) -> None:
         self.created.append((job, content))
@@ -69,6 +73,12 @@ class _FakeStore:
     async def mark_indexing(self, job_id, worker_id) -> None:
         return None
 
+    async def reserve_version(
+        self, job_id, worker_id, metadata, content_hash
+    ) -> VersionDecision:
+        self.reservations.append((metadata.version, content_hash))
+        return self.version_decision
+
     async def complete(self, job_id, worker_id, result) -> None:
         self.completed = result
 
@@ -77,6 +87,10 @@ class _FakeStore:
     ) -> bool:
         self.failed.append((error_code, retryable))
         return self.failure_outcome
+
+    async def defer_busy_version(self, job_id, worker_id, error_code) -> None:
+        del worker_id, error_code
+        self.deferred.append(job_id)
 
     async def queued_job_ids(self, limit: int) -> list[str]:
         return []
@@ -226,6 +240,77 @@ async def test_worker_indexes_and_acknowledges_message() -> None:
     assert redis.acked == [b"1-0"]
     assert redis.deleted == [b"1-0"]
     assert redis.released == ["job-1"]
+    assert store.reservations[0][0] == "1"
+
+
+@pytest.mark.asyncio
+async def test_superseded_document_event_skips_vector_indexing() -> None:
+    store = _FakeStore()
+    store.version_decision = VersionDecision.SUPERSEDED
+    store.envelope = IngestionEnvelope(
+        job_id="job-stale",
+        principal=_principal(),
+        metadata=_metadata(),
+        filename="visit.md",
+        media_type="text/markdown",
+        content="旧版内容".encode(),
+    )
+    redis = _FakeRedis()
+    coordinator = _coordinator(store, redis)
+
+    await coordinator._process_message(b"stale-1", {b"job_id": b"job-stale"})
+
+    assert store.completed is not None
+    assert store.completed.status == "superseded"
+    assert store.completed.chunk_count == 0
+    assert redis.released == ["job-stale"]
+
+
+@pytest.mark.asyncio
+async def test_conflicting_version_is_failed_without_retry() -> None:
+    store = _FakeStore()
+    store.version_decision = VersionDecision.CONFLICT
+    store.envelope = IngestionEnvelope(
+        job_id="job-conflict",
+        principal=_principal(),
+        metadata=_metadata(),
+        filename="visit.md",
+        media_type="text/markdown",
+        content="冲突内容".encode(),
+    )
+    redis = _FakeRedis()
+    coordinator = _coordinator(store, redis)
+
+    await coordinator._process_message(
+        b"conflict-1", {b"job_id": b"job-conflict"}
+    )
+
+    assert store.failed == [("DocumentVersionConflictError", False)]
+    assert redis.added == []
+    assert redis.released == ["job-conflict"]
+
+
+@pytest.mark.asyncio
+async def test_busy_document_version_is_deferred_without_spending_retry() -> None:
+    store = _FakeStore()
+    store.version_decision = VersionDecision.BUSY
+    store.envelope = IngestionEnvelope(
+        job_id="job-busy",
+        principal=_principal(),
+        metadata=_metadata(),
+        filename="visit.md",
+        media_type="text/markdown",
+        content="较新的内容".encode(),
+    )
+    redis = _FakeRedis()
+    coordinator = _coordinator(store, redis)
+
+    await coordinator._process_message(b"busy-1", {b"job_id": b"job-busy"})
+
+    assert store.deferred == ["job-busy"]
+    assert store.failed == []
+    assert redis.added == [{"job_id": "job-busy"}]
+    assert redis.released == []
 
 
 class _FailingGateway(MockToolGateway):

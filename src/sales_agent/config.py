@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     memory_token_budget: int = 1_800
     max_tool_iterations: int = 3
     llm_budget_tokens: int = 12_000
+    prompt_catalog_path: Path = Field(default=Path("./config/prompts.json"))
+    prompt_default_locale: str = "zh-CN"
+    intent_router_backend: Literal["rules", "llm", "laya"] = "rules"
+    intent_confidence_threshold: float = Field(default=0.65, ge=0, le=1)
+    laya_device: str = "cpu"
+    laya_preload: bool = False
+    laya_model: Literal["auto", "english", "multilingual", "typed-decisions"] = "auto"
     export_dir: Path = Field(default=Path("./exports"))
     export_backend: Literal["mock", "xlsx"] = "mock"
     postgres_pool_min_size: int = Field(default=1, ge=1, le=20)
@@ -152,6 +159,8 @@ class Settings(BaseSettings):
             raise ValueError("production requires INGESTION_BACKEND=redis_stream")
         if self.llm_reasoning_backend == "llm" and not self.llm_api_key.get_secret_value():
             raise ValueError("LLM_API_KEY is required when LLM_REASONING_BACKEND=llm")
+        if self.intent_router_backend == "llm" and not self.llm_api_key.get_secret_value():
+            raise ValueError("LLM_API_KEY is required when INTENT_ROUTER_BACKEND=llm")
         return self
 
     @model_validator(mode="after")

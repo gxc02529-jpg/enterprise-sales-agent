@@ -7,6 +7,8 @@ from typing import Any
 
 from sales_agent.config import Settings
 from sales_agent.contracts import (
+    DocumentDeleteRequest,
+    DocumentDeleteResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
     Principal,
@@ -204,15 +206,70 @@ class MilvusRagService:
         vectors = await self.embedder.embed_documents([chunk.text for chunk in chunks])
         rows = [chunk.as_milvus_row(vector) for chunk, vector in zip(chunks, vectors, strict=True)]
         client = await self._get_client()
-        delete_filter = (
+        document_filter = (
             f"tenant_id == {_literal(principal.tenant_id)} and "
             f"document_id == {_literal(document.document_id)}"
         )
-        await asyncio.to_thread(
-            client.delete, collection_name=self.collection_name, filter=delete_filter
+        existing = await asyncio.to_thread(
+            client.query,
+            collection_name=self.collection_name,
+            filter=document_filter,
+            output_fields=[
+                "content_hash",
+                "title",
+                "document_type",
+                "owner_user_id",
+                "customer_ids",
+                "permission_tags",
+                "source_uri",
+                "version",
+            ],
+            limit=1,
         )
+        owner = document.owner_user_id or principal.user_id
+        expected_metadata = {
+            "content_hash": content_hash,
+            "title": document.title,
+            "document_type": document.document_type,
+            "owner_user_id": owner,
+            "customer_ids": list(dict.fromkeys(document.customer_ids)),
+            "permission_tags": list(dict.fromkeys(document.permission_tags)),
+            "source_uri": document.source_uri or "",
+            "version": document.version,
+        }
+        unchanged = bool(existing) and all(
+            existing[0].get(key) == value for key, value in expected_metadata.items()
+        )
+        if unchanged:
+            return DocumentIngestResponse(
+                document_id=document.document_id,
+                content_hash=content_hash,
+                chunk_count=len(rows),
+                row_count=0,
+                status="unchanged",
+                elapsed_ms=int((perf_counter() - started) * 1000),
+            )
+        acl_changed = bool(existing) and (
+            existing[0].get("owner_user_id") != owner
+            or existing[0].get("permission_tags") != expected_metadata["permission_tags"]
+        )
+        # Permission tightening fails closed: remove the old ACL before publishing
+        # new chunks. Ordinary content updates publish first to avoid an empty window.
+        if acl_changed:
+            await asyncio.to_thread(
+                client.delete,
+                collection_name=self.collection_name,
+                filter=document_filter,
+            )
         if rows:
-            await asyncio.to_thread(client.insert, self.collection_name, rows)
+            await asyncio.to_thread(client.upsert, self.collection_name, rows)
+        delete_filter = (
+            f"{document_filter} and content_hash != {_literal(content_hash)}"
+        )
+        if not acl_changed:
+            await asyncio.to_thread(
+                client.delete, collection_name=self.collection_name, filter=delete_filter
+            )
         elapsed_ms = int((perf_counter() - started) * 1000)
         return DocumentIngestResponse(
             document_id=document.document_id,
@@ -221,6 +278,31 @@ class MilvusRagService:
             row_count=len(rows),
             status="indexed",
             elapsed_ms=elapsed_ms,
+        )
+
+    async def delete(
+        self, principal: Principal, document: DocumentDeleteRequest
+    ) -> DocumentDeleteResponse:
+        started = perf_counter()
+        await self.ensure_collection()
+        client = await self._get_client()
+        expression = (
+            f"tenant_id == {_literal(principal.tenant_id)} and "
+            f"document_id == {_literal(document.document_id)}"
+        )
+        result = await asyncio.to_thread(
+            client.delete, collection_name=self.collection_name, filter=expression
+        )
+        if isinstance(result, dict):
+            count = int(result.get("delete_count", 0))
+        else:
+            count = int(getattr(result, "delete_count", 0))
+        return DocumentDeleteResponse(
+            document_id=document.document_id,
+            status="retired",
+            deleted_chunks=count,
+            row_count=count,
+            elapsed_ms=int((perf_counter() - started) * 1000),
         )
 
     async def search(

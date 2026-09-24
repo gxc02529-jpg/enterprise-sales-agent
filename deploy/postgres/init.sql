@@ -80,6 +80,49 @@ CREATE TABLE IF NOT EXISTS document_ingestion_job (
     completed_at timestamptz
 );
 
+CREATE TABLE IF NOT EXISTS knowledge_document (
+    tenant_id text NOT NULL,
+    document_id text NOT NULL,
+    status text NOT NULL DEFAULT 'updating'
+        CHECK (status IN ('updating', 'active', 'failed', 'retired')),
+    active_version text,
+    active_content_hash text,
+    active_source_updated_at timestamptz,
+    pending_version text,
+    pending_job_id uuid,
+    pending_source_updated_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, document_id)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_document_version (
+    tenant_id text NOT NULL,
+    document_id text NOT NULL,
+    version text NOT NULL,
+    content_hash text NOT NULL,
+    source_updated_at timestamptz NOT NULL,
+    job_id uuid,
+    status text NOT NULL
+        CHECK (status IN ('pending', 'active', 'superseded', 'failed', 'retired')),
+    metadata jsonb NOT NULL DEFAULT '{}',
+    indexed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, document_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_outbox (
+    event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id text NOT NULL,
+    aggregate_id text NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb NOT NULL,
+    status text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'published', 'failed')),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    published_at timestamptz
+);
+
 ALTER TABLE document_ingestion_job
 DROP CONSTRAINT IF EXISTS document_ingestion_job_status_check;
 ALTER TABLE document_ingestion_job
@@ -145,16 +188,27 @@ CREATE INDEX IF NOT EXISTS idx_graph_review ON graph_change_request (tenant_id, 
 CREATE INDEX IF NOT EXISTS idx_ingestion_queue
 ON document_ingestion_job (status, created_at)
 WHERE status IN ('queued', 'parsing', 'indexing');
+CREATE INDEX IF NOT EXISTS idx_knowledge_version_status
+ON knowledge_document_version (tenant_id, document_id, status, source_updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_outbox_pending
+ON knowledge_outbox (created_at)
+WHERE status = 'pending';
 
 ALTER TABLE customer ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sales_contract ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_metadata ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_ingestion_job ENABLE ROW LEVEL SECURITY;
+ALTER TABLE knowledge_document ENABLE ROW LEVEL SECURITY;
+ALTER TABLE knowledge_document_version ENABLE ROW LEVEL SECURITY;
+ALTER TABLE knowledge_outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_record ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer FORCE ROW LEVEL SECURITY;
 ALTER TABLE sales_contract FORCE ROW LEVEL SECURITY;
 ALTER TABLE document_metadata FORCE ROW LEVEL SECURITY;
 ALTER TABLE document_ingestion_job FORCE ROW LEVEL SECURITY;
+ALTER TABLE knowledge_document FORCE ROW LEVEL SECURITY;
+ALTER TABLE knowledge_document_version FORCE ROW LEVEL SECURITY;
+ALTER TABLE knowledge_outbox FORCE ROW LEVEL SECURITY;
 ALTER TABLE memory_record FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS customer_scope_policy ON customer;
@@ -190,6 +244,57 @@ USING (
 
 DROP POLICY IF EXISTS ingestion_job_scope_policy ON document_ingestion_job;
 CREATE POLICY ingestion_job_scope_policy ON document_ingestion_job
+USING (
+    current_setting('app.ingestion_worker', true) = 'true'
+    OR (
+        tenant_id = current_setting('app.tenant_id', true)
+        AND current_setting('app.is_admin', true) = 'true'
+    )
+)
+WITH CHECK (
+    current_setting('app.ingestion_worker', true) = 'true'
+    OR (
+        tenant_id = current_setting('app.tenant_id', true)
+        AND current_setting('app.is_admin', true) = 'true'
+    )
+);
+
+DROP POLICY IF EXISTS knowledge_document_scope_policy ON knowledge_document;
+CREATE POLICY knowledge_document_scope_policy ON knowledge_document
+USING (
+    current_setting('app.ingestion_worker', true) = 'true'
+    OR (
+        tenant_id = current_setting('app.tenant_id', true)
+        AND current_setting('app.is_admin', true) = 'true'
+    )
+)
+WITH CHECK (
+    current_setting('app.ingestion_worker', true) = 'true'
+    OR (
+        tenant_id = current_setting('app.tenant_id', true)
+        AND current_setting('app.is_admin', true) = 'true'
+    )
+);
+
+DROP POLICY IF EXISTS knowledge_version_scope_policy ON knowledge_document_version;
+CREATE POLICY knowledge_version_scope_policy ON knowledge_document_version
+USING (
+    current_setting('app.ingestion_worker', true) = 'true'
+    OR (
+        tenant_id = current_setting('app.tenant_id', true)
+        AND current_setting('app.is_admin', true) = 'true'
+    )
+)
+WITH CHECK (
+    current_setting('app.ingestion_worker', true) = 'true'
+    OR (
+        tenant_id = current_setting('app.tenant_id', true)
+        AND current_setting('app.is_admin', true) = 'true'
+    )
+);
+
+DROP POLICY IF EXISTS knowledge_outbox_scope_policy ON knowledge_outbox;
+CREATE POLICY knowledge_outbox_scope_policy ON knowledge_outbox
 USING (
     current_setting('app.ingestion_worker', true) = 'true'
     OR (

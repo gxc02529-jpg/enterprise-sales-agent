@@ -10,6 +10,7 @@ from sales_agent.contracts import (
     DocumentIngestionJob,
     DocumentIngestRequest,
     DocumentJobMetadata,
+    DocumentVersionPage,
     Principal,
 )
 from sales_agent.logging import logger
@@ -57,6 +58,10 @@ class IngestionCoordinator(Protocol):
     ) -> list[DocumentIngestionJob]: ...
 
     async def retry(self, principal: Principal, job_id: str) -> DocumentIngestionJob: ...
+
+    async def list_versions(
+        self, principal: Principal, document_id: str, *, limit: int
+    ) -> DocumentVersionPage: ...
 
     async def health(self) -> dict[str, Any]: ...
 
@@ -168,6 +173,12 @@ class InMemoryIngestionCoordinator:
             self.jobs[job_id] = retried
         self.queue.put_nowait(envelope)
         return retried
+
+    async def list_versions(
+        self, principal: Principal, document_id: str, *, limit: int
+    ) -> DocumentVersionPage:
+        del principal, limit
+        return DocumentVersionPage(document_id=document_id, status="untracked")
 
     async def health(self) -> dict[str, Any]:
         return {

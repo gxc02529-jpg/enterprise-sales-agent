@@ -40,6 +40,34 @@ def test_analyze_with_dev_identity() -> None:
     assert body["citations"][0]["source_type"] == "sql"
 
 
+def test_graph_request_pauses_and_resumes_for_clarification() -> None:
+    headers = {"Authorization": "Bearer dev-token"}
+    initial = client.post(
+        "/v1/analyze",
+        headers=headers,
+        json={"query": "查看客户关系", "session_id": "clarify-graph-1"},
+    )
+    assert initial.status_code == 200
+    body = initial.json()
+    assert body["status"] == "needs_clarification"
+    assert body["tool_results"] == []
+    assert body["clarification"]["required_fields"] == ["entity_name"]
+
+    resumed = client.post(
+        "/v1/analyze/clarify",
+        headers=headers,
+        json={
+            "session_id": "clarify-graph-1",
+            "answers": {"entity_name": "华东智造公司"},
+        },
+    )
+    assert resumed.status_code == 200
+    result = resumed.json()
+    assert result["status"] == "completed"
+    assert result["clarification"] is None
+    assert result["tool_results"][0]["route"] == "graph"
+
+
 def test_production_rejects_mock_backends() -> None:
     with pytest.raises(ValidationError):
         Settings(
@@ -170,6 +198,44 @@ def test_admin_can_submit_document_ingestion() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "simulated"
     assert response.json()["chunk_count"] == 1
+
+
+def test_admin_can_retire_document_index() -> None:
+    response = client.request(
+        "DELETE",
+        "/v1/admin/documents/visit-001",
+        headers={"Authorization": "Bearer dev-admin-token"},
+        json={"document_id": "visit-001", "reason": "source document was retired"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "simulated"
+
+
+def test_document_path_and_body_id_must_match() -> None:
+    response = client.request(
+        "DELETE",
+        "/v1/admin/documents/visit-001",
+        headers={"Authorization": "Bearer dev-admin-token"},
+        json={"document_id": "visit-002", "reason": "incorrect document"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "DOCUMENT_ID_MISMATCH"
+
+
+def test_admin_can_inspect_document_version_state() -> None:
+    response = client.get(
+        "/v1/admin/documents/visit-001/versions",
+        headers={"Authorization": "Bearer dev-admin-token"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "document_id": "visit-001",
+        "status": "untracked",
+        "active_version": None,
+        "pending_version": None,
+        "items": [],
+        "count": 0,
+    }
 
 
 def test_sales_user_cannot_ingest_documents() -> None:

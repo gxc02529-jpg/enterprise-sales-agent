@@ -18,7 +18,7 @@ async def test_graph_fuses_tools_and_citations() -> None:
         "tenant_id": "tenant-1",
         "roles": ["sales"],
         "scope_tags": ["sales:sales-1"],
-        "query": "统计销售额，查看客户关系以及拜访纪要",
+        "query": "统计销售额，查看“华东智造公司”客户关系以及拜访纪要",
         "locale": "zh-CN",
         "routes": [],
         "memory_context": [],
@@ -88,10 +88,13 @@ def test_checkpoint_state_is_safe_data_only() -> None:
 
 
 class FakeLLM:
-    async def route(self, _: str) -> tuple[list[Route], dict[str, int]]:
+    async def route(
+        self, _: str, *, locale: str = "zh-CN"
+    ) -> tuple[list[Route], dict[str, int]]:
+        del locale
         return [Route.SQL], {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
 
-    async def synthesize(self, *_: object) -> LLMGeneration:
+    async def synthesize(self, *_: object, **__: object) -> LLMGeneration:
         return LLMGeneration(
             text="模型生成的有据结论（sales_metrics:req-llm）",
             model="fake-model",

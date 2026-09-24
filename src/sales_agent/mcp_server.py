@@ -10,6 +10,7 @@ from fastmcp.server.auth import StaticTokenVerifier
 from sales_agent.audit import AuditEvent, build_audit_sink, payload_digest
 from sales_agent.config import get_settings
 from sales_agent.contracts import (
+    DocumentDeleteRequest,
     DocumentIngestRequest,
     GraphQueryParams,
     Principal,
@@ -171,6 +172,22 @@ async def ingest_document(
         request_id,
         document.model_dump(mode="json"),
         lambda: backend.ingest_document(principal, document, request_id),
+    )
+
+
+@mcp.tool(tags={"rag", "admin", "write"})
+async def delete_document(
+    principal: Principal, document: DocumentDeleteRequest, request_id: str
+) -> dict[str, Any]:
+    """Retire every indexed generation for a tenant-scoped document."""
+    if "admin" not in principal.roles and "knowledge_admin" not in principal.roles:
+        raise PermissionError("knowledge_admin or admin role required")
+    return await _execute_tool(
+        "delete_document",
+        principal,
+        request_id,
+        document.model_dump(mode="json"),
+        lambda: backend.delete_document(principal, document, request_id),
     )
 
 

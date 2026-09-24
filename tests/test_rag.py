@@ -1,6 +1,10 @@
+import pytest
+
+from sales_agent.config import Settings
 from sales_agent.contracts import DocumentIngestRequest, Principal, RagQueryParams
 from sales_agent.rag.chunking import chunk_document
 from sales_agent.rag.milvus import (
+    MilvusRagService,
     build_permission_filter,
     is_visible_hit,
     select_candidates,
@@ -75,3 +79,90 @@ def test_low_score_candidates_are_rejected_before_citation() -> None:
     ]
     selected = select_candidates(candidates, min_score=0.35, limit=5)
     assert [item["document_id"] for item in selected] == ["strong"]
+
+
+class _FakeEmbedder:
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1] * 8 for _ in texts]
+
+
+class _FakeMilvusClient:
+    def __init__(self, existing: dict | None = None) -> None:
+        self.existing = existing
+        self.operations: list[str] = []
+
+    def query(self, **_: object) -> list[dict]:
+        return [self.existing] if self.existing else []
+
+    def upsert(self, collection_name: str, rows: list[dict]) -> None:
+        del collection_name, rows
+        self.operations.append("upsert")
+
+    def delete(self, **_: object) -> dict[str, int]:
+        self.operations.append("delete")
+        return {"delete_count": 1}
+
+
+@pytest.mark.asyncio
+async def test_acl_change_deletes_old_generation_before_upsert() -> None:
+    document = DocumentIngestRequest(
+        document_id="visit-acl",
+        title="纪要",
+        document_type="visit_note",
+        text="客户预算将在第四季度确认。",
+        permission_tags=["region:east"],
+    )
+    client = _FakeMilvusClient(
+        {
+            "content_hash": "old",
+            "title": "纪要",
+            "document_type": "visit_note",
+            "owner_user_id": 'sales"001',
+            "customer_ids": [],
+            "permission_tags": ["region:west"],
+            "source_uri": "",
+            "version": "1",
+        }
+    )
+    service = MilvusRagService(
+        Settings(rag_embedding_dim=8),
+        _FakeEmbedder(),  # type: ignore[arg-type]
+        None,
+        client=client,
+    )
+    service._schema_ready = True
+    result = await service.ingest(_principal(), document)
+    assert result.status == "indexed"
+    assert client.operations == ["delete", "upsert"]
+
+
+@pytest.mark.asyncio
+async def test_content_update_upserts_before_old_generation_delete() -> None:
+    document = DocumentIngestRequest(
+        document_id="visit-content",
+        title="纪要",
+        document_type="visit_note",
+        text="这是更新后的正文。",
+        permission_tags=["region:east"],
+    )
+    client = _FakeMilvusClient(
+        {
+            "content_hash": "old",
+            "title": "纪要",
+            "document_type": "visit_note",
+            "owner_user_id": 'sales"001',
+            "customer_ids": [],
+            "permission_tags": ["region:east"],
+            "source_uri": "",
+            "version": "1",
+        }
+    )
+    service = MilvusRagService(
+        Settings(rag_embedding_dim=8),
+        _FakeEmbedder(),  # type: ignore[arg-type]
+        None,
+        client=client,
+    )
+    service._schema_ready = True
+    await service.ingest(_principal(), document)
+    assert client.operations == ["upsert", "delete"]

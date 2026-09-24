@@ -4,6 +4,8 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 from time import perf_counter
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -20,8 +22,9 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from langgraph.types import Command
 
 from sales_agent.agent.graph import build_sales_graph
 from sales_agent.audit import AuditEvent, build_audit_sink
@@ -29,21 +32,27 @@ from sales_agent.config import Settings, get_settings
 from sales_agent.contracts import (
     AnalysisRequest,
     AnalysisResponse,
+    ClarificationResumeRequest,
+    DocumentDeleteRequest,
+    DocumentDeleteResponse,
     DocumentIngestionJob,
     DocumentIngestionJobPage,
     DocumentIngestRequest,
     DocumentIngestResponse,
     DocumentJobMetadata,
+    DocumentVersionPage,
     LLMConfigView,
     LLMProbeResponse,
     MemoryCandidateRequest,
     MemoryRecord,
     Principal,
 )
+from sales_agent.intent import build_intent_router
 from sales_agent.llm.provider import build_llm_provider, config_view
 from sales_agent.logging import configure_logging, logger
 from sales_agent.memory_factory import build_memory_service
 from sales_agent.observability import MetricsCollector
+from sales_agent.prompts import build_prompt_registry
 from sales_agent.rag.ingestion import (
     DocumentTooLargeError,
     IngestionQueueFullError,
@@ -84,6 +93,11 @@ def _input(payload: AnalysisRequest, principal: Principal) -> dict[str, Any]:
         "query": payload.query,
         "locale": payload.locale,
         "routes": [],
+        "routing_confidence": 0.0,
+        "routing_backend": "unresolved",
+        "resolved_entity_name": "",
+        "clarification": None,
+        "clarification_answers": {},
         "memory_context": [],
         "tool_results": [],
         "citations": [],
@@ -97,6 +111,13 @@ def _input(payload: AnalysisRequest, principal: Principal) -> dict[str, Any]:
 
 
 def _response(state: dict[str, Any]) -> AnalysisResponse:
+    tool_results = state.get("tool_results", [])
+    confidences = [
+        float(tr["confidence"])
+        for tr in tool_results
+        if isinstance(tr, dict) and "confidence" in tr
+    ]
+    confidence = min(confidences) if confidences else 1.0
     return AnalysisResponse(
         request_id=state["request_id"],
         session_id=state["session_id"],
@@ -104,9 +125,11 @@ def _response(state: dict[str, Any]) -> AnalysisResponse:
         routes=state.get("routes", []),
         citations=state.get("citations", []),
         status=state.get("status", "failed"),
-        tool_results=state.get("tool_results", []),
+        clarification=state.get("clarification"),
+        tool_results=tool_results,
         warnings=state.get("warnings", []),
         llm_usage=state.get("llm_usage", {}),
+        confidence=confidence,
     )
 
 
@@ -143,6 +166,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     gateway = _gateway(settings, metrics)
     audit_sink = build_audit_sink(settings)
     llm_provider = build_llm_provider(settings)
+    intent_router = build_intent_router(settings, llm_provider)
+    prompt_registry = build_prompt_registry(settings)
     admission = build_admission_controller(settings)
     ingestion = build_ingestion_coordinator(gateway, settings)
 
@@ -157,6 +182,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_tool_iterations=settings.max_tool_iterations,
             checkpointer=checkpointer,
             llm=(llm_provider if settings.llm_reasoning_backend == "llm" else None),
+            intent_router=intent_router,
+            intent_confidence_threshold=settings.intent_confidence_threshold,
             llm_budget_tokens=settings.llm_budget_tokens,
         )
 
@@ -317,6 +344,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "checkpointer_backend": settings.checkpointer_backend,
         }
 
+    @app.get("/", response_class=HTMLResponse)
+    async def web_ui() -> HTMLResponse:
+        html_path = Path(__file__).with_name("webui.html")
+        html = html_path.read_text(encoding="utf-8")
+        return HTMLResponse(html, media_type="text/html")
+
     @app.get("/ready")
     async def ready() -> JSONResponse:
         try:
@@ -341,6 +374,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _: Annotated[Principal, Depends(require_admin)],
     ) -> LLMConfigView:
         return config_view(settings)
+
+    @app.get("/v1/admin/prompts")
+    async def list_prompts(
+        _: Annotated[Principal, Depends(require_admin)],
+    ) -> dict[str, Any]:
+        templates = prompt_registry.list_templates()
+        return {
+            "catalog": str(settings.prompt_catalog_path),
+            "default_locale": settings.prompt_default_locale,
+            "items": [template.model_dump(mode="json") for template in templates],
+        }
 
     @app.post("/v1/admin/llm/probe", response_model=LLMProbeResponse)
     async def probe_llm(
@@ -382,6 +426,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request.state.request_id = request_id
         return await gateway.ingest_document(principal, payload, request_id)
 
+    @app.delete(
+        "/v1/admin/documents/{document_id}", response_model=DocumentDeleteResponse
+    )
+    async def delete_document(
+        document_id: str,
+        payload: DocumentDeleteRequest,
+        request: Request,
+        principal: Annotated[Principal, Depends(require_admin)],
+    ) -> DocumentDeleteResponse:
+        if payload.document_id != document_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "DOCUMENT_ID_MISMATCH"},
+            )
+        request_id = request.headers.get("x-request-id") or str(uuid4())
+        request.state.request_id = request_id
+        return await gateway.delete_document(principal, payload, request_id)
+
+    @app.get(
+        "/v1/admin/documents/{document_id}/versions",
+        response_model=DocumentVersionPage,
+    )
+    async def list_document_versions(
+        document_id: str,
+        principal: Annotated[Principal, Depends(require_admin)],
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> DocumentVersionPage:
+        return await ingestion.list_versions(principal, document_id, limit=limit)
+
     @app.post(
         "/v1/admin/documents/jobs",
         response_model=DocumentIngestionJob,
@@ -399,6 +472,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         owner_user_id: Annotated[str | None, Form()] = None,
         source_uri: Annotated[str | None, Form()] = None,
         version: Annotated[str, Form()] = "1",
+        source_updated_at: Annotated[datetime | None, Form()] = None,
     ) -> DocumentIngestionJob:
         request_id = request.headers.get("x-request-id") or str(uuid4())
         request.state.request_id = request_id
@@ -412,6 +486,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 owner_user_id=owner_user_id,
                 source_uri=source_uri,
                 version=version,
+                source_updated_at=source_updated_at,
             )
         except ValueError as exc:
             raise HTTPException(
@@ -499,6 +574,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ) from exc
         return _response(state)
 
+    @app.post("/v1/analyze/clarify", response_model=AnalysisResponse)
+    async def resume_analysis(
+        payload: ClarificationResumeRequest,
+        request: Request,
+        principal: Principal = admitted_dependency,
+    ) -> AnalysisResponse:
+        request.state.session_id = payload.session_id
+        thread_id = f"{principal.tenant_id}:{principal.user_id}:{payload.session_id}"
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            async with asyncio.timeout(settings.api_request_timeout_seconds):
+                state = await request.app.state.graph.ainvoke(
+                    Command(resume=payload.answers), config=config
+                )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={"code": "REQUEST_TIMEOUT", "message": "analysis deadline exceeded"},
+            ) from exc
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "NO_PENDING_CLARIFICATION"},
+            ) from exc
+        request.state.request_id = state.get("request_id")
+        return _response(state)
+
     @app.post("/v1/analyze/stream")
     async def analyze_stream(
         payload: AnalysisRequest,
@@ -543,7 +645,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 yield "event: failed\ndata: " + json.dumps(failure, ensure_ascii=False) + "\n\n"
                 return
             final = _response(last).model_dump(mode="json")
-            yield "event: completed\ndata: " + json.dumps(final, ensure_ascii=False) + "\n\n"
+            event_name = (
+                "clarification_required"
+                if final["status"] == "needs_clarification"
+                else "completed"
+            )
+            yield (
+                f"event: {event_name}\ndata: "
+                + json.dumps(final, ensure_ascii=False)
+                + "\n\n"
+            )
 
         return StreamingResponse(events(), media_type="text/event-stream")
 

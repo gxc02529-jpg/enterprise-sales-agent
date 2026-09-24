@@ -29,6 +29,19 @@ class AnalysisRequest(BaseModel):
     locale: str = "zh-CN"
 
 
+class ClarificationPrompt(BaseModel):
+    clarification_id: str
+    question: str
+    required_fields: list[str]
+    options: list[str] = Field(default_factory=list)
+    reason: str
+
+
+class ClarificationResumeRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    answers: dict[str, str | list[str]] = Field(min_length=1, max_length=10)
+
+
 class Citation(BaseModel):
     source_type: Literal["sql", "graph", "document", "memory", "export"]
     source_id: str
@@ -55,10 +68,17 @@ class AnalysisResponse(BaseModel):
     answer: str
     routes: list[Route]
     citations: list[Citation]
-    status: Literal["completed", "needs_human_review", "failed"]
+    status: Literal["completed", "needs_clarification", "needs_human_review", "failed"]
+    clarification: ClarificationPrompt | None = None
     tool_results: list[ToolResult] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     llm_usage: dict[str, int] = Field(default_factory=dict)
+    confidence: float = Field(
+        default=1.0,
+        ge=0,
+        le=1,
+        description="回答级置信度，取各工具结果置信度的下确界（最弱环节决定整体可信度）",
+    )
 
 
 class MemoryRecord(BaseModel):
@@ -95,6 +115,11 @@ class LLMConfigView(BaseModel):
     circuit_failure_threshold: int
     circuit_recovery_seconds: int
     max_concurrency: int
+    intent_router_backend: Literal["rules", "llm", "laya"]
+    intent_confidence_threshold: float
+    laya_model: str
+    laya_device: str
+    laya_preload: bool
 
 
 class LLMProbeResponse(BaseModel):
@@ -143,13 +168,27 @@ class DocumentIngestRequest(BaseModel):
     owner_user_id: str | None = Field(default=None, max_length=128)
     source_uri: str | None = Field(default=None, max_length=2_048)
     version: str = Field(default="1", max_length=64)
+    source_updated_at: datetime | None = None
 
 
 class DocumentIngestResponse(BaseModel):
     document_id: str
     content_hash: str
     chunk_count: int = Field(ge=0)
-    status: Literal["indexed", "simulated"]
+    status: Literal["indexed", "unchanged", "superseded", "simulated"]
+    elapsed_ms: int = 0
+    row_count: int | None = None
+
+
+class DocumentDeleteRequest(BaseModel):
+    document_id: str = Field(min_length=1, max_length=256)
+    reason: str = Field(min_length=2, max_length=500)
+
+
+class DocumentDeleteResponse(BaseModel):
+    document_id: str
+    status: Literal["retired", "simulated"]
+    deleted_chunks: int = Field(default=0, ge=0)
     elapsed_ms: int = 0
     row_count: int | None = None
 
@@ -163,6 +202,7 @@ class DocumentJobMetadata(BaseModel):
     owner_user_id: str | None = Field(default=None, max_length=128)
     source_uri: str | None = Field(default=None, max_length=2_048)
     version: str = Field(default="1", max_length=64)
+    source_updated_at: datetime | None = None
 
 
 class DocumentIngestionJob(BaseModel):
@@ -184,3 +224,23 @@ class DocumentIngestionJob(BaseModel):
 class DocumentIngestionJobPage(BaseModel):
     items: list[DocumentIngestionJob]
     count: int = Field(ge=0)
+
+
+class DocumentVersionRecord(BaseModel):
+    document_id: str
+    version: str
+    content_hash: str
+    source_updated_at: datetime
+    status: Literal["pending", "active", "superseded", "failed", "retired"]
+    job_id: str | None = None
+    indexed_at: datetime | None = None
+    created_at: datetime
+
+
+class DocumentVersionPage(BaseModel):
+    document_id: str
+    status: Literal["untracked", "updating", "active", "failed", "retired"]
+    active_version: str | None = None
+    pending_version: str | None = None
+    items: list[DocumentVersionRecord] = Field(default_factory=list)
+    count: int = Field(default=0, ge=0)

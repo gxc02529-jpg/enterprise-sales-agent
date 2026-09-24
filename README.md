@@ -151,9 +151,9 @@ LLM_MAX_RETRIES=2
 LLM_BUDGET_TOKENS=12000
 ```
 
-Router 和 synthesis 模型留空时继承 `LLM_MODEL`。配置 API 永远不会返回 API Key；当前配置来源是环境变量或密钥管理系统，修改后重启服务生效。Provider 扩展点位于 `src/sales_agent/llm/provider.py`，完整契约见 [docs/llm-integration.md](docs/llm-integration.md)。
+Router 和 synthesis 模型留空时继承 `LLM_MODEL`。配置 API 永远不会返回 API Key；当前配置来源是环境变量或密钥管理系统，修改后重启服务生效。Provider 扩展点位于 `src/sales_agent/llm/provider.py`。
 
-Prompt 正文位于 `config/prompts.json`，可独立发布、热重载和版本回滚；意图路由与澄清流程见 [docs/prompt-intent-clarification.md](docs/prompt-intent-clarification.md)。
+Prompt 正文位于 `config/prompts.json`，可独立发布、热重载和版本回滚；意图路由与澄清实现位于 `src/sales_agent/intent/` 和 `src/sales_agent/agent/graph.py`。
 
 ## RAG 与韧性配置
 
@@ -170,7 +170,7 @@ RAG_MIN_SCORE=0.35
 RAG_MIN_RETRIEVAL_SCORE=0.0
 ```
 
-详细数据模型、权限过滤和摄取流程见 [docs/rag-pipeline.md](docs/rag-pipeline.md)，高频更新与版本一致性边界见 [docs/knowledge-update.md](docs/knowledge-update.md)。Recall@K、MRR、负例拒答和权限泄漏门禁见 [docs/rag-evaluation.md](docs/rag-evaluation.md)。超时、熔断、限流和降级语义见 [docs/resilience.md](docs/resilience.md)。
+RAG 数据模型、权限过滤和摄取实现位于 `src/sales_agent/rag/`。Recall@K、MRR、负例拒答和权限泄漏门禁见 [docs/rag-evaluation.md](docs/rag-evaluation.md)。
 
 端到端 Agent 评测与 GAIA/BFCL/AgentBench/Ragas 的映射见 [docs/agent-evaluation.md](docs/agent-evaluation.md)。
 
@@ -186,8 +186,10 @@ src/sales_agent/
   memory.py         三层记忆召回与候选写入边界
   security.py       JWT 到 Principal/权限标签
 deploy/postgres/    业务治理表、审计表、RLS 示例
-docs/               架构、复用调研和迭代路线
-tests/              最小回归测试
+docs/               项目架构与测试/评测说明
+tests/              自动化回归测试
+evaluations/        Agent 与 RAG 评测数据集
+bench/              并发压测脚本
 ```
 
 ## 安全边界
@@ -198,24 +200,3 @@ tests/              最小回归测试
 - `dev-token` 仅供本地使用；生产必须设置 `ALLOW_DEV_TOKEN=false`，轮换 JWT/MCP 密钥并使用 TLS。
 - PostgreSQL checkpointer 上线时应启用严格 msgpack 白名单并执行官方 `setup()` 初始化。
 - `/health` 是进程存活探针；`/ready` 会检查 MCP 工具以及摄取任务的 PostgreSQL/Redis 依赖。
-
-## GitHub 调研结论
-
-截至 2026-09-22，没有发现一个仓库完整覆盖本项目的组合。建议“借组件，不整库 fork”：
-
-| 项目 | 可复用部分 | 不直接采用的原因 |
-|---|---|---|
-| [agentic-rag-postgres-mcp](https://github.com/jayanthlocam/agentic-rag-postgres-mcp) | FastAPI、LangGraph、MCP、JWT、多租户 RAG、引用与评测 | pgvector 路线，无 NebulaGraph、Milvus 和受控三层记忆 |
-| [langgraph-agent-memory](https://github.com/Ofekirsh/langgraph-agent-memory) | Redis 长期记忆、去重、抽取、MCP 调用流程 | 示例业务较窄，且缺少企业审核/只读全局记忆治理 |
-| [confidentialmind-mcp-agent](https://github.com/ConfidentialMind/confidentialmind-mcp-agent) | 只读 PostgreSQL MCP、RAG MCP、结构化日志 | 工具仍偏通用数据库访问，不符合本项目业务参数化红线 |
-| [langhost](https://github.com/langhost/langhost) | 自托管 LangGraph 服务、PostgreSQL/Redis 持久化 | 更适合作为后续运行时选项，不包含销售业务与数据治理 |
-| [Sage](https://github.com/Krish-Parekh/Sage) | 检索前规划、两阶段 rerank、评测、鉴权与可观测 | Qdrant/Supabase 技术路线，只有文档 RAG |
-| [Multi-Agent-Orchestration](https://github.com/Theepankumargandhi/Multi-Agent-Orchestration) | Router、RAG、知识图谱、checkpointer、CI/CD 组织方式 | 12 Agent 架构过重，与你“不滥用 A2A”的约束相反 |
-| [LangGraph 官方 checkpoint-postgres](https://github.com/langchain-ai/langgraph/tree/main/libs/checkpoint-postgres) | 生产 Checkpointer 的标准实现 | 是基础组件，不是完整业务项目 |
-| [FastMCP](https://github.com/PrefectHQ/fastmcp) | MCP 服务、客户端、HTTP 鉴权和测试模式 | 是框架，需要自行实现权限、审计和业务工具 |
-
-详细取舍见 [docs/reuse-research.md](docs/reuse-research.md)。
-
-## 下一步
-
-推荐按 [docs/roadmap.md](docs/roadmap.md) 的顺序推进：下一阶段补扫描件 OCR/MinerU、RAG 评测集和文档版本管理；随后接 NebulaGraph CDC、审核与版本回滚后台。
